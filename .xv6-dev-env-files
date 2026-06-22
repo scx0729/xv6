@@ -1,0 +1,10 @@
+.envrc
+.xv6-dev-env-files
+.clangd
+.vscode/settings.json
+.vscode/extensions.json
+.vscode/tasks.json
+.vscode/launch.json
+.vscode/xv6-gdb
+gen-user-gdb.sh
+README.xv6-dev-env.md

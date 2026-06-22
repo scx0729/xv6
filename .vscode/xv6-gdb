@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+root="${XV6_REPO_ROOT:-$(git -C "$(dirname "$0")/.." rev-parse --show-toplevel 2>/dev/null || pwd)}"
+# Keep debugger startup quiet: MI clients can be sensitive to unexpected stdout.
+# shellcheck disable=SC1091
+XV6_SKIP_AUTO_COMPILE_COMMANDS=1 source "$root/.envrc" >/dev/null
+
+if [ -z "${XV6_GDB:-}" ]; then
+  echo "xv6-gdb: no GDB found; set XV6_GDB in .envrc.local" >&2
+  exit 127
+fi
+
+exec "$XV6_GDB" -q -nx "$@"

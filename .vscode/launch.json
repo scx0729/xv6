@@ -1,0 +1,101 @@
+{
+  "version": "0.2.0",
+  "inputs": [
+    {
+      "id": "userProgram",
+      "type": "pickString",
+      "description": "Select the user program to debug",
+      "options": [
+        "cat",
+        "echo",
+        "grep",
+        "kill",
+        "ln",
+        "ls",
+        "mkdir",
+        "rm",
+        "sh",
+        "stressfs",
+        "usertests",
+        "wc",
+        "zombie"
+      ]
+    }
+  ],
+  "configurations": [
+    {
+      "name": "xv6: Debug Kernel",
+      "type": "cppdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/kernel/kernel",
+      "cwd": "${workspaceFolder}",
+      "MIMode": "gdb",
+      "miDebuggerPath": "${workspaceFolder}/.vscode/xv6-gdb",
+      "miDebuggerServerAddress": "${config:xv6.gdbHost}:${config:xv6.gdbPort}",
+      "stopAtConnect": true,
+      "launchCompleteCommand": "exec-continue",
+      "preLaunchTask": "xv6: qemu-gdb",
+      "postDebugTask": "xv6: stop qemu",
+      "externalConsole": false,
+      "setupCommands": [
+        {
+          "description": "Set RISC-V architecture",
+          "text": "set architecture riscv:rv64",
+          "ignoreFailures": true
+        },
+        {
+          "description": "Show asm at current line",
+          "text": "set disassemble-next-line auto",
+          "ignoreFailures": true
+        },
+        {
+          "description": "Use compressed breakpoints",
+          "text": "set riscv use-compressed-breakpoints yes",
+          "ignoreFailures": true
+        }
+      ],
+      "logging": {
+        "engineLogging": true,
+        "trace": true,
+        "traceResponse": true
+      }
+    },
+    {
+      "name": "xv6: Debug User Program",
+      "type": "cppdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/kernel/kernel",
+      "cwd": "${workspaceFolder}",
+      "MIMode": "gdb",
+      "miDebuggerPath": "${workspaceFolder}/.vscode/xv6-gdb",
+      "miDebuggerServerAddress": "${config:xv6.gdbHost}:${config:xv6.gdbPort}",
+      "stopAtConnect": true,
+      "launchCompleteCommand": "exec-continue",
+      "preLaunchTask": "xv6: gen user gdb script",
+      "postDebugTask": "xv6: stop qemu",
+      "externalConsole": false,
+      "setupCommands": [
+        {
+          "description": "Set RISC-V 64 architecture",
+          "text": "set architecture riscv:rv64",
+          "ignoreFailures": true
+        },
+        {
+          "description": "Enable compressed breakpoints",
+          "text": "set riscv use-compressed-breakpoints yes",
+          "ignoreFailures": true
+        },
+        {
+          "description": "Load user program symbols",
+          "text": "source ${workspaceFolder}/.direnv/xv6-user-gdb",
+          "ignoreFailures": false
+        }
+      ],
+      "logging": {
+        "engineLogging": true,
+        "trace": true,
+        "traceResponse": true
+      }
+    }
+  ]
+}

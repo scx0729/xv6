@@ -1,0 +1,14 @@
+{
+  "C_Cpp.intelliSenseEngine": "disabled",
+  "clangd.arguments": [
+    "--completion-style=detailed",
+    "--query-driver=/usr/bin/riscv64-*-gcc,/usr/local/bin/riscv64-*-gcc,/opt/riscv/bin/riscv64-*-gcc,/nix/store/*/bin/riscv64-*-gcc,/usr/bin/gcc,/usr/local/bin/gcc"
+  ],
+  "files.associations": {
+    "*.S": "asm"
+  },
+  "editor.formatOnSave": false,
+  "xv6.gdbHost": "127.0.0.1",
+  "xv6.gdbPort": "25000",
+  "xv6.cpus": "1"
+}

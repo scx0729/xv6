@@ -1,0 +1,155 @@
+{
+  "version": "2.0.0",
+  "inputs": [
+    {
+      "id": "userProgram",
+      "type": "pickString",
+      "description": "Select the user program to debug",
+      "options": [
+        "cat",
+        "echo",
+        "grep",
+        "kill",
+        "ln",
+        "ls",
+        "mkdir",
+        "rm",
+        "sh",
+        "stressfs",
+        "usertests",
+        "wc",
+        "zombie"
+      ]
+    }
+  ],
+  "tasks": [
+    {
+      "label": "xv6: build",
+      "type": "process",
+      "command": "/bin/bash",
+      "args": [
+        "-lc",
+        "source ./.envrc; exec make kernel/kernel fs.img"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": [
+        "$gcc"
+      ],
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      }
+    },
+    {
+      "label": "xv6: refresh compile_commands",
+      "type": "process",
+      "command": "/bin/bash",
+      "args": [
+        "-lc",
+        "export XV6_AUTO_COMPILE_COMMANDS=0; source ./.envrc; export XV6_AUTO_COMPILE_COMMANDS=1; _xv6_refresh_compile_commands force"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": [
+        "$gcc"
+      ],
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "clear": true
+      }
+    },
+    {
+      "label": "xv6: qemu",
+      "type": "process",
+      "command": "/bin/bash",
+      "args": [
+        "-lc",
+        "source ./.envrc; exec make CPUS=\"$XV6_CPUS\" qemu"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated"
+      }
+    },
+    {
+      "label": "xv6: qemu-gdb",
+      "type": "process",
+      "command": "/bin/bash",
+      "args": [
+        "-lc",
+        "source ./.envrc; port=\"$XV6_GDBPORT\"; cpus=\"$XV6_CPUS\"; pidfile=\"$PWD/.direnv/xv6-qemu-gdb.pid\"; mkdir -p \"$PWD/.direnv\"; rm -f \"$pidfile\"; is_listening() { if command -v ss >/dev/null 2>&1; then ss -ltnH \"sport = :$port\" | grep -q .; elif command -v lsof >/dev/null 2>&1; then lsof -nP -iTCP:\"$port\" -sTCP:LISTEN | grep -q .; else return 1; fi; }; if is_listening; then echo \"TCP port $port is already in use\" >&2; exit 1; fi; make kernel/kernel fs.img; rm -f .gdbinit; echo QEMU_GDB_STARTING; parent=$$; (until is_listening; do if ! kill -0 \"$parent\" 2>/dev/null; then exit 1; fi; sleep 0.05; done; echo QEMU_GDB_READY) & exec \"$XV6_QEMU\" -machine virt -bios none -kernel kernel/kernel -m 128M -smp \"$cpus\" -nographic -drive file=fs.img,if=none,format=raw,id=x0 -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 -S -pidfile \"$pidfile\" -gdb \"tcp::$port\""
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "isBackground": true,
+      "problemMatcher": {
+        "owner": "xv6-qemu",
+        "source": "xv6-qemu",
+        "pattern": {
+          "regexp": "^(.*):(\\d+):(\\d+):\\s+(warning|error):\\s+(.*)$",
+          "file": 1,
+          "line": 2,
+          "column": 3,
+          "severity": 4,
+          "message": 5
+        },
+        "background": {
+          "activeOnStart": false,
+          "beginsPattern": "^QEMU_GDB_STARTING\\s*$",
+          "endsPattern": "^QEMU_GDB_READY\\s*$"
+        }
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "clear": true
+      },
+      "runOptions": {
+        "instanceLimit": 1
+      }
+    },
+    {
+      "label": "xv6: gen user gdb script",
+      "type": "process",
+      "command": "/bin/bash",
+      "args": [
+        "-lc",
+        "source ./.envrc; exec ./gen-user-gdb.sh \"$1\"",
+        "xv6-gen-user-gdb",
+        "${input:userProgram}"
+      ],
+      "dependsOn": [
+        "xv6: qemu-gdb"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "presentation": {
+        "reveal": "silent",
+        "clear": true
+      }
+    },
+    {
+      "label": "xv6: stop qemu",
+      "type": "process",
+      "command": "/bin/bash",
+      "args": [
+        "-lc",
+        "source ./.envrc >/dev/null; pidfile=\"$PWD/.direnv/xv6-qemu-gdb.pid\"; if [ -s \"$pidfile\" ]; then pid=\"$(cat \"$pidfile\")\"; if kill -0 \"$pid\" 2>/dev/null; then kill \"$pid\" 2>/dev/null || true; fi; rm -f \"$pidfile\"; else qemu=\"$(basename \"$XV6_QEMU\")\"; pkill -f \"$qemu.*-gdb tcp::$XV6_GDBPORT\" || true; fi"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": []
+    }
+  ]
+}

@@ -1,0 +1,65 @@
+CompileFlags:
+  Remove:
+    - -Werror
+    - -march=*
+    - -nostdinc
+  Add:
+    - -march=rv64gc
+    - -nostdlibinc
+
+Index:
+  Background: Build
+
+Diagnostics:
+  UnusedIncludes: None
+  MissingIncludes: None
+
+---
+If:
+  PathMatch: ^(kernel|user)/.*\.h$
+CompileFlags:
+  Add:
+    - -include
+    - kernel/types.h
+
+---
+If:
+  PathMatch: ^kernel/(defs|proc)\.h$
+CompileFlags:
+  Add:
+    - -include
+    - kernel/riscv.h
+    - -include
+    - kernel/param.h
+
+---
+If:
+  PathMatch: ^kernel/proc\.h$
+CompileFlags:
+  Add:
+    - -include
+    - kernel/spinlock.h
+    - -include
+    - kernel/file.h
+
+---
+If:
+  PathMatch: ^kernel/sleeplock\.h$
+CompileFlags:
+  Add:
+    - -include
+    - kernel/spinlock.h
+
+---
+If:
+  PathMatch: ^kernel/(file|buf)\.h$
+CompileFlags:
+  Add:
+    - -include
+    - kernel/param.h
+    - -include
+    - kernel/spinlock.h
+    - -include
+    - kernel/sleeplock.h
+    - -include
+    - kernel/fs.h
