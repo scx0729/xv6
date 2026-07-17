@@ -673,3 +673,22 @@ procdump(void)
     printf("\n");
   }
 }
+
+int pgaccess(void *base, int len, void *mask){
+  struct proc *p = myproc();
+  unsigned int abits = 0;
+  for(int i = 0; i < len; i++){
+    uint64 addr = (uint64)base + i * PGSIZE;
+    pte_t *pte = walk(p->pagetable, addr, 0);
+    if(pte == 0)
+      return -1;
+    if((*pte & PTE_V) == 0)
+      return -1;
+    if(*pte & PTE_A)
+      abits = (abits | (1 << i));
+    *pte = *pte & ~(PTE_A);
+  }
+  if(copyout(p->pagetable, (uint64)mask, (char *)&abits, sizeof(abits)) < 0)
+    return -1;
+  return 0;
+}
