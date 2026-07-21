@@ -1,0 +1,23 @@
+1. Other system calls that could use a shared page
+
+uptime() could be accelerated in a similar way. The kernel could keep
+the current tick count in a read-only page mapped into every process.
+A user-space implementation could read it without executing ecall.
+The kernel would retain write access while user space would only have
+PTE_R | PTE_U permission.
+
+2. Explanation of the vmprint output
+
+Page 0 contains the init program's code and data. Its leaf PTE has
+PTE_V, PTE_R, PTE_W, PTE_X, and PTE_U.
+
+Page 1 is the guard page below the user stack. Its PTE is valid and has
+read/write/execute bits, but PTE_U is clear, so code running in user
+mode cannot read or write it.
+
+Page 2 contains the initial user stack, including argv pointers and
+argument strings. It is accessible in user mode.
+
+The third-to-last page is USYSCALL. It contains struct usyscall,
+including the process PID. It is mapped with PTE_R | PTE_U and without
+PTE_W, so user space can read it but cannot modify it.
