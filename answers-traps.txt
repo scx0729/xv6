@@ -1,0 +1,29 @@
+  1. According to the RISC-V calling convention, the first eight function
+     arguments are passed in registers a0 through a7. In main's call to
+     printf, 13 is the third argument, so it is stored in a2.
+
+  2. There is no call to f in main and no call to g in f. The compiler
+     inlined the functions and constant-folded f(8) + 1 to 12. Therefore,
+     main directly loads 12 into a1.
+
+  3. printf is located at address 0x0000000000000628.
+
+  4. The jalr instruction that calls printf is at address 0x34. Since the
+     instruction is four bytes long, ra contains 0x38 after the jalr.
+
+  5. The output is:
+
+     HE110 World
+
+     57616 is 0xE110. On little-endian RISC-V, i is stored in memory as
+     bytes 0x72, 0x6c, 0x64, 0x00, which form the string "rld".
+
+  6. On a big-endian machine, i should be set to 0x726c6400 so that its
+     memory bytes are still 0x72, 0x6c, 0x64, 0x00. The value 57616 does
+     not need to change because endianness does not change the numeric
+     value passed to printf.
+
+  7. The value printed after "y=" is undefined and cannot be predicted.
+     The format string requests two integer arguments, but only one integer
+     argument, 3, is provided. printf will try to read the missing argument
+     from a2, whose value was not supplied by this call.
