@@ -291,6 +291,24 @@ uvmfree(pagetable_t pagetable, uint64 sz)
   freewalk(pagetable);
 }
 
+int cowalloc(pagetable_t pagetable, uint64 va)
+{
+  pte_t *pte = walk(pagetable, va, 0);
+  if(pte == 0 || (*pte & PTE_V) == 0 || (*pte & PTE_U) == 0 || (*pte & PTE_COW) == 0)
+    return -1;
+  uint64 old_pa = PTE2PA(*pte);
+  uint flags = PTE_FLAGS(*pte);
+  char *mem = kalloc();
+  if(mem == 0)
+    return -1;
+  memmove(mem, (void*)old_pa, PGSIZE);
+  flags = (flags & ~PTE_COW) | PTE_W;
+  *pte = PA2PTE(mem) | flags;
+  kfree((void*)old_pa);
+  sfence_vma();
+  return 0;
+}
+
 // Given a parent process's page table, copy
 // its memory into a child's page table.
 // Copies both the page table and the
@@ -303,8 +321,6 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
   pte_t *pte;
   uint64 pa, i;
   uint flags;
-  char *mem;
-
   for(i = 0; i < sz; i += PGSIZE){
     if((pte = walk(old, i, 0)) == 0)
       panic("uvmcopy: pte should exist");
@@ -312,13 +328,14 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
       panic("uvmcopy: page not present");
     pa = PTE2PA(*pte);
     flags = PTE_FLAGS(*pte);
-    if((mem = kalloc()) == 0)
-      goto err;
-    memmove(mem, (char*)pa, PGSIZE);
-    if(mappages(new, i, PGSIZE, (uint64)mem, flags) != 0){
-      kfree(mem);
+    if(flags & PTE_W)
+      flags = (flags & ~PTE_W) | PTE_COW;
+    if(mappages(new, i, PGSIZE, pa, flags) != 0){
       goto err;
     }
+    if(*pte & PTE_W)
+      *pte = (*pte & ~PTE_W) | PTE_COW;
+    krefinc(pa);
   }
   return 0;
 
@@ -347,9 +364,19 @@ int
 copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
 {
   uint64 n, va0, pa0;
-
+  pte_t *pte;
   while(len > 0){
     va0 = PGROUNDDOWN(dstva);
+    if(va0 >= MAXVA)
+      return -1;
+    pte = walk(pagetable, va0, 0);
+    if(pte == 0)
+      return -1;
+    if(*pte & PTE_COW){
+      if(cowalloc(pagetable, dstva) < 0)
+        return -1;
+    }
+    // cowalloc可能已经修改了物理页映射，必须重新查询
     pa0 = walkaddr(pagetable, va0);
     if(pa0 == 0)
       return -1;
