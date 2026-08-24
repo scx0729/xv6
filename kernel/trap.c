@@ -5,6 +5,10 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
+#include "fs.h"
+#include "sleeplock.h"
+#include "file.h"
+#include "fcntl.h"
 
 struct spinlock tickslock;
 uint ticks;
@@ -65,6 +69,47 @@ usertrap(void)
     intr_on();
 
     syscall();
+  } else if(r_scause() == 13 || r_scause() == 15){
+    uint64 fault_addr = r_stval();
+    struct vma *v = 0;
+    for(int i = 0;i < 16;i++){
+      if(p->vmas[i].addr <= fault_addr && fault_addr < p->vmas[i].addr + p->vmas[i].length && p->vmas[i].file != 0){
+        v = &p->vmas[i];
+        break;
+      }
+    }
+    if(v == 0)
+      exit(-1);
+    if((r_scause() == 13 && !(v->prot & PROT_READ)) || (r_scause() == 15 && !(v->prot & PROT_WRITE)))
+      exit(-1);
+    uint64 page_va = PGROUNDDOWN(fault_addr);
+    uint64 delta = page_va - v->addr;
+    uint64 file_offset = v->offset + delta;
+    uint64 n = PGSIZE;
+    if(n > v->length - delta)
+      n = v->length - delta;
+    void *mem = kalloc();
+    if(mem == 0)
+      exit(-1);
+    memset(mem, 0, PGSIZE);
+    ilock(v->file->ip);
+    if(readi(v->file->ip, 0, (uint64)mem, file_offset, n) < 0){
+      iunlock(v->file->ip);
+      kfree(mem);
+      exit(-1);
+    }
+    iunlock(v->file->ip);
+    int flags = PTE_U;
+    if(v->prot == PROT_READ)
+      flags |= PTE_R;
+    if(v->prot == PROT_WRITE)
+      flags |= PTE_R | PTE_W;
+    if(v->prot == (PROT_READ | PROT_WRITE))
+      flags |= PTE_R | PTE_W;
+    if(mappages(p->pagetable, page_va, PGSIZE, (uint64)mem, flags) < 0){
+      kfree(mem);
+      exit(-1);
+    }
   } else if((which_dev = devintr()) != 0){
     // ok
   } else {

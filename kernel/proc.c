@@ -295,6 +295,12 @@ fork(void)
   // Cause fork to return 0 in the child.
   np->trapframe->a0 = 0;
 
+  for(int i = 0;i < 16;i++){
+    np->vmas[i] = p->vmas[i];
+    if(np->vmas[i].file != 0)
+      filedup(np->vmas[i].file);
+  }
+
   // increment reference counts on open file descriptors.
   for(i = 0; i < NOFILE; i++)
     if(p->ofile[i])
