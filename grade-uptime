@@ -1,0 +1,36 @@
+#!/usr/bin/env python3
+
+import re
+
+from gradelib import *
+
+
+r = Runner(save("xv6.out.uptime"))
+
+
+@test(1, "uptime advances")
+def test_uptime_advances():
+    r.run_qemu(shell_script([
+        "uptime",
+        "sleep 10",
+        "uptime",
+    ]))
+
+    ticks = [
+        int(line)
+        for line in r.qemu.output.splitlines()
+        if re.fullmatch(r"[0-9]+", line)
+    ]
+    assert_equal(
+        len(ticks),
+        2,
+        "uptime should print exactly one decimal tick count per invocation",
+    )
+    if ticks[1] - ticks[0] < 10:
+        raise AssertionError(
+            "uptime did not advance by 10 ticks: %d -> %d" %
+            (ticks[0], ticks[1])
+        )
+
+
+run_tests()
