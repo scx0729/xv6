@@ -1,0 +1,47 @@
+#!/usr/bin/env python3
+
+import re
+
+from gradelib import *
+
+
+r = Runner(save("xv6.out.find-regex"))
+
+
+@test(1, "find regular expressions")
+def test_find_regular_expressions():
+    r.run_qemu(shell_script([
+        "mkdir redot",
+        "echo > redot/cat",
+        "echo > redot/car",
+        "echo > redot/caaat",
+        "echo > redot/dog",
+        "find redot ^ca.$",
+        "mkdir restar",
+        "echo > restar/ct",
+        "echo > restar/cat",
+        "echo > restar/caat",
+        "echo > restar/cart",
+        "find restar ^ca*t$",
+    ]))
+
+    found = sorted(
+        line
+        for line in r.qemu.output.splitlines()
+        if re.fullmatch(r"re(?:dot|star)/[a-z]+", line)
+    )
+    expected = sorted([
+        "redot/car",
+        "redot/cat",
+        "restar/caat",
+        "restar/cat",
+        "restar/ct",
+    ])
+    assert_equal(
+        found,
+        expected,
+        "find returned incorrect matches for ^ca.$ or ^ca*t$",
+    )
+
+
+run_tests()
