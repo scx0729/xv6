@@ -3,6 +3,7 @@
 #include "kernel/types.h"
 #include "user/user.h"
 #include "kernel/fcntl.h"
+#include "kernel/stat.h"
 
 // Parsed command representation
 #define EXEC  1
@@ -123,8 +124,7 @@ runcmd(struct cmd *cmd)
 
   case BACK:
     bcmd = (struct backcmd*)cmd;
-    if(fork1() == 0)
-      runcmd(bcmd->cmd);
+    runcmd(bcmd->cmd);
     break;
   }
   exit(0);
@@ -133,7 +133,9 @@ runcmd(struct cmd *cmd)
 int
 getcmd(char *buf, int nbuf)
 {
-  fprintf(2, "$ ");
+  struct stat st;
+  if(fstat(0, &st) >= 0 && st.type == T_DEVICE)
+    fprintf(2, "$ ");
   memset(buf, 0, nbuf);
   gets(buf, nbuf);
   if(buf[0] == 0) // EOF
@@ -164,9 +166,23 @@ main(void)
         fprintf(2, "cannot cd %s\n", buf+3);
       continue;
     }
-    if(fork1() == 0)
-      runcmd(parsecmd(buf));
-    wait(0);
+    struct cmd *cmd = parsecmd(buf);
+    if(cmd->type == EXEC){
+      struct execcmd *ecmd = (struct execcmd*)cmd;
+      if(ecmd->argv[1] == 0 && ecmd->argv[0] && strcmp(ecmd->argv[0], "wait") == 0){
+        while(wait(0) > 0)
+          ;
+        continue;
+      }
+    }
+    int pid = fork1();
+    if(pid == 0)
+      runcmd(cmd);
+    if(cmd->type != BACK){
+      int wpid = 0;
+      while((wpid = wait(0)) > 0 && wpid != pid)
+        ;
+    }
   }
   exit(0);
 }
