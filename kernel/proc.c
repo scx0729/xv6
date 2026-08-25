@@ -5,6 +5,10 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
+#include "fs.h"
+#include "sleeplock.h"
+#include "file.h"
+#include "fcntl.h"
 
 struct cpu cpus[NCPU];
 
@@ -349,6 +353,34 @@ exit(int status)
 
   if(p == initproc)
     panic("init exiting");
+
+  for(int i = 0;i < 16;i++){
+    if(p->vmas[i].file != 0){
+      for(uint64 va = p->vmas[i].addr;va < p->vmas[i].addr + p->vmas[i].length;va += PGSIZE){
+        pte_t *pte = walk(p->pagetable, va, 0);
+        if(pte == 0 || !(*pte & PTE_V))
+          continue;
+        if(p->vmas[i].flags == MAP_SHARED && (p->vmas[i].prot & PROT_WRITE)){
+          uint64 pa = PTE2PA(*pte);
+          uint64 delta = va - p->vmas[i].addr;
+          uint64 file_offset = p->vmas[i].offset + delta;
+          int n = PGSIZE;
+          if(n > p->vmas[i].length - delta)
+            n = p->vmas[i].length - delta;
+          begin_op();
+          ilock(p->vmas[i].file->ip);
+          writei(p->vmas[i].file->ip, 0, pa, file_offset, n);
+          iunlock(p->vmas[i].file->ip);
+          end_op();
+        }
+        uvmunmap(p->pagetable, va, 1, 1);
+      }
+      struct file *f = p->vmas[i].file;
+      memset(&p->vmas[i], 0, sizeof(p->vmas[i]));
+      fileclose(f);
+    }
+    
+  }  
 
   // Close all open files.
   for(int fd = 0; fd < NOFILE; fd++){
