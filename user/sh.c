@@ -11,6 +11,7 @@
 #define PIPE  3
 #define LIST  4
 #define BACK  5
+#define SUBSHELL 6
 
 #define MAXARGS 10
 
@@ -50,6 +51,11 @@ struct backcmd {
   struct cmd *cmd;
 };
 
+struct subshellcmd{
+  int type;
+  struct cmd *cmd;
+};
+
 int fork1(void);  // Fork but panics on failure.
 void panic(char*);
 struct cmd *parsecmd(char*);
@@ -65,6 +71,7 @@ runcmd(struct cmd *cmd)
   struct listcmd *lcmd;
   struct pipecmd *pcmd;
   struct redircmd *rcmd;
+  struct subshellcmd *sscmd;
 
   if(cmd == 0)
     exit(1);
@@ -127,6 +134,10 @@ runcmd(struct cmd *cmd)
     bcmd = (struct backcmd*)cmd;
     runcmd(bcmd->cmd);
     break;
+  case SUBSHELL:
+    sscmd = (struct subshellcmd*)cmd;
+    runshellcmd(sscmd->cmd);
+    break;
   }
   exit(0);
 }
@@ -144,6 +155,14 @@ runshellcmd(struct cmd *cmd)
         ;
       return;
     }
+    if(ecmd->argv[0] && strcmp(ecmd->argv[0], "cd") == 0){
+      if(ecmd->argv[1] && ecmd->argv[2] == 0){
+        if(chdir(ecmd->argv[1]) < 0)
+          fprintf(2, "cannot cd %s\n", ecmd->argv[1]);
+      } else
+        fprintf(2, "usage: cd directory\n");
+      return;
+    }
   }
   // 顺序命令由父Shell递归处理
   if(cmd->type == LIST){
@@ -156,8 +175,10 @@ runshellcmd(struct cmd *cmd)
   if(cmd->type == BACK){
     struct backcmd *bcmd = (struct backcmd*)cmd;
     int pid = fork1();
-    if(pid == 0)
-      runcmd(bcmd->cmd);
+    if(pid == 0){
+      runshellcmd(bcmd->cmd);
+      exit(0);
+    }
     return;
   }
   // 重定向命令由父Shell修改fd并递归处理
@@ -179,6 +200,19 @@ runshellcmd(struct cmd *cmd)
     close(rcmd->fd);
     dup(savefd);
     close(savefd);
+    return;
+  }
+  // 子Shell命令由父Shell直接fork
+  if(cmd->type == SUBSHELL){
+    struct subshellcmd *sscmd = (struct subshellcmd*)cmd;
+    int pid = fork1();
+    if(pid == 0){
+      runshellcmd(sscmd->cmd);
+      exit(0);
+    }
+    int wpid = 0;
+    while((wpid = wait(0)) > 0 && wpid != pid)
+      ;
     return;
   }
   // 其他命令作为前台命令执行
@@ -213,6 +247,7 @@ freecmd(struct cmd *cmd)
   struct listcmd *lcmd;
   struct pipecmd *pcmd;
   struct redircmd *rcmd;
+  struct subshellcmd *sscmd;
 
   switch (cmd->type) {
   case EXEC:
@@ -234,6 +269,10 @@ freecmd(struct cmd *cmd)
   case BACK:
       bcmd = (struct backcmd*)cmd;
       freecmd(bcmd->cmd);
+      break;
+  case SUBSHELL:
+      sscmd = (struct subshellcmd*)cmd;
+      freecmd(sscmd->cmd);
       break;
   default:
       panic("freecmd");
@@ -257,13 +296,6 @@ main(void)
 
   // Read and run input commands.
   while(getcmd(buf, sizeof(buf)) >= 0){
-    if(buf[0] == 'c' && buf[1] == 'd' && buf[2] == ' '){
-      // Chdir must be called by the parent, not the child.
-      buf[strlen(buf)-1] = 0;  // chop \n
-      if(chdir(buf+3) < 0)
-        fprintf(2, "cannot cd %s\n", buf+3);
-      continue;
-    }
     struct cmd *cmd = parsecmd(buf);
     runshellcmd(cmd);
     freecmd(cmd);
@@ -353,6 +385,18 @@ backcmd(struct cmd *subcmd)
   cmd = malloc(sizeof(*cmd));
   memset(cmd, 0, sizeof(*cmd));
   cmd->type = BACK;
+  cmd->cmd = subcmd;
+  return (struct cmd*)cmd;
+}
+
+struct cmd*
+subshellcmd(struct cmd *subcmd)
+{
+  struct subshellcmd *cmd;
+
+  cmd = malloc(sizeof(*cmd));
+  memset(cmd, 0, sizeof(*cmd));
+  cmd->type = SUBSHELL;
   cmd->cmd = subcmd;
   return (struct cmd*)cmd;
 }
@@ -508,6 +552,7 @@ parseblock(char **ps, char *es)
   if(!peek(ps, es, ")"))
     panic("syntax - missing )");
   gettoken(ps, es, 0, 0);
+  cmd = subshellcmd(cmd);
   cmd = parseredirs(cmd, ps, es);
   return cmd;
 }
@@ -555,6 +600,7 @@ nulterminate(struct cmd *cmd)
   struct listcmd *lcmd;
   struct pipecmd *pcmd;
   struct redircmd *rcmd;
+  struct subshellcmd *sscmd;
 
   if(cmd == 0)
     return 0;
@@ -587,6 +633,10 @@ nulterminate(struct cmd *cmd)
   case BACK:
     bcmd = (struct backcmd*)cmd;
     nulterminate(bcmd->cmd);
+    break;
+  case SUBSHELL:
+    sscmd = (struct subshellcmd*)cmd;
+    nulterminate(sscmd->cmd);
     break;
   }
   return cmd;
