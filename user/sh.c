@@ -53,6 +53,7 @@ struct backcmd {
 int fork1(void);  // Fork but panics on failure.
 void panic(char*);
 struct cmd *parsecmd(char*);
+void runshellcmd(struct cmd*);
 
 // Execute cmd.  Never returns.
 void
@@ -130,6 +131,65 @@ runcmd(struct cmd *cmd)
   exit(0);
 }
 
+void
+runshellcmd(struct cmd *cmd)
+{
+  if(cmd == 0)
+    return;
+  // wait必须在父Shell执行
+  if(cmd->type == EXEC){
+    struct execcmd *ecmd = (struct execcmd*)cmd;
+    if(ecmd->argv[1] == 0 && ecmd->argv[0] && strcmp(ecmd->argv[0], "wait") == 0){
+      while(wait(0) > 0)
+        ;
+      return;
+    }
+  }
+  // 顺序命令由父Shell递归处理
+  if(cmd->type == LIST){
+    struct listcmd *lcmd = (struct listcmd*)cmd;
+    runshellcmd(lcmd->left);
+    runshellcmd(lcmd->right);
+    return;
+  }
+  // 后台命令由父Shell直接创建，不等待
+  if(cmd->type == BACK){
+    struct backcmd *bcmd = (struct backcmd*)cmd;
+    int pid = fork1();
+    if(pid == 0)
+      runcmd(bcmd->cmd);
+    return;
+  }
+  // 重定向命令由父Shell修改fd并递归处理
+  if(cmd->type == REDIR){
+    struct redircmd *rcmd = (struct redircmd*)cmd;
+    int savefd = dup(rcmd->fd);
+    if(savefd < 0){
+      fprintf(2, "dup failed\n");
+      return;
+    }
+    close(rcmd->fd);
+    if(open(rcmd->file, rcmd->mode) < 0){
+      dup(savefd);
+      close(savefd);
+      fprintf(2, "open %s failed\n", rcmd->file);
+      return;
+    }
+    runshellcmd(rcmd->cmd);
+    close(rcmd->fd);
+    dup(savefd);
+    close(savefd);
+    return;
+  }
+  // 其他命令作为前台命令执行
+  int pid = fork1();
+  if(pid == 0)
+    runcmd(cmd);
+  int wpid = 0;
+  while((wpid = wait(0)) > 0 && wpid != pid)
+    ;
+}
+
 int
 getcmd(char *buf, int nbuf)
 {
@@ -141,6 +201,44 @@ getcmd(char *buf, int nbuf)
   if(buf[0] == 0) // EOF
     return -1;
   return 0;
+}
+
+void
+freecmd(struct cmd *cmd)
+{
+  if(cmd == 0)
+    return;
+  struct backcmd *bcmd;
+  struct execcmd *ecmd;
+  struct listcmd *lcmd;
+  struct pipecmd *pcmd;
+  struct redircmd *rcmd;
+
+  switch (cmd->type) {
+  case EXEC:
+      break;
+  case REDIR:
+      rcmd = (struct redircmd*)cmd;
+      freecmd(rcmd->cmd);
+      break;
+  case LIST:
+      lcmd = (struct listcmd*)cmd;
+      freecmd(lcmd->left);
+      freecmd(lcmd->right);
+      break;
+  case PIPE:
+      pcmd = (struct pipecmd*)cmd;
+      freecmd(pcmd->left);
+      freecmd(pcmd->right);
+      break;
+  case BACK:
+      bcmd = (struct backcmd*)cmd;
+      freecmd(bcmd->cmd);
+      break;
+  default:
+      panic("freecmd");
+  }
+  free(ecmd = (struct execcmd*)cmd);
 }
 
 int
@@ -167,22 +265,8 @@ main(void)
       continue;
     }
     struct cmd *cmd = parsecmd(buf);
-    if(cmd->type == EXEC){
-      struct execcmd *ecmd = (struct execcmd*)cmd;
-      if(ecmd->argv[1] == 0 && ecmd->argv[0] && strcmp(ecmd->argv[0], "wait") == 0){
-        while(wait(0) > 0)
-          ;
-        continue;
-      }
-    }
-    int pid = fork1();
-    if(pid == 0)
-      runcmd(cmd);
-    if(cmd->type != BACK){
-      int wpid = 0;
-      while((wpid = wait(0)) > 0 && wpid != pid)
-        ;
-    }
+    runshellcmd(cmd);
+    freecmd(cmd);
   }
   exit(0);
 }
