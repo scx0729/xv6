@@ -4,6 +4,7 @@
 #include "user/user.h"
 #include "kernel/fcntl.h"
 #include "kernel/stat.h"
+#include "kernel/fs.h"
 
 // Parsed command representation
 #define EXEC  1
@@ -14,6 +15,9 @@
 #define SUBSHELL 6
 
 #define MAXARGS 10
+
+char whitespace[] = " \t\r\n\v";
+char symbols[] = "<|>&;()";
 
 struct cmd {
   int type;
@@ -225,13 +229,113 @@ runshellcmd(struct cmd *cmd)
 }
 
 int
+complete(char *buf, int len, int max)
+{
+  int fd, prefix_len, common_len = 0, common_count = 0;
+  struct dirent de;
+  struct stat st;
+  char common[DIRSIZ + 1];
+
+  if((fd = open(".", 0)) < 0){
+    fprintf(2, "complete: cannot open \".\"\n");
+    return len;
+  }
+  if(fstat(fd, &st) < 0){
+    fprintf(2, "complete: cannot stat \".\"\n");
+    close(fd);
+    return len;
+  }
+  if(st.type != T_DIR){
+    close(fd);
+    return len;
+  }
+  int start = len;
+  while(start > 0 && strchr(symbols, buf[start - 1]) == 0 && strchr(whitespace, buf[start - 1]) == 0)
+    start--;
+  prefix_len = len - start;
+  while(read(fd, &de, sizeof(de)) == sizeof(de)){
+    if(de.inum == 0)
+      continue;
+    char candidate[DIRSIZ + 1];
+    for(int i = 0;i < DIRSIZ;i++)
+      candidate[i] = de.name[i];
+    candidate[DIRSIZ] = '\0';
+    int candidate_len = strlen(candidate);
+    if(candidate_len < prefix_len)
+      continue;
+    int flag = 1;
+    for(int i = start, j = 0;i < len;i++, j++){
+      if(buf[i] != candidate[j]){
+        flag = 0;
+        break;
+      }
+    }
+    if(!flag)
+      continue;
+    if(common_count == 0){
+      for(int i = 0;i < candidate_len;i++)
+        common[i] = candidate[i];
+      common_len = candidate_len;
+      common[common_len] = '\0';
+    } else {
+      int min_len = common_len < candidate_len ? common_len : candidate_len;
+      common_len = min_len;
+      common[common_len] = '\0';
+      for(int i = 0;i < min_len;i++)
+        if(common[i] != candidate[i]){
+          common[i] = '\0';
+          common_len = i;
+          break;
+        } 
+    }
+    common_count++;
+  }
+  if(common_count == 0)
+    common_len = prefix_len;
+  else{
+    if(len + common_len - prefix_len + 1 <= max){
+      for(int i = prefix_len;i < common_len;i++)
+        buf[start + i] = common[i];
+      buf[start + common_len] = '\0';
+      write(2, common + prefix_len, common_len - prefix_len);
+    } else {
+      close(fd);
+      return len;
+    }
+  }
+  close(fd);
+  return start + common_len;
+}
+
+char*
+getshell(char *buf, int max)
+{
+  int i, cc;
+  char c;
+  
+  for(i=0; i+1 < max; ){
+    cc = read(0, &c, 1);
+    if(cc < 1)
+      break;
+    if(c == '\t')
+      i = complete(buf, i, max);
+    else
+      buf[i++] = c;
+    if(c == '\n' || c == '\r')
+      break;
+  }
+  buf[i] = '\0';
+  return buf;
+}
+
+int
 getcmd(char *buf, int nbuf)
 {
   struct stat st;
   if(fstat(0, &st) >= 0 && st.type == T_DEVICE)
     fprintf(2, "$ ");
   memset(buf, 0, nbuf);
-  gets(buf, nbuf);
+  getshell(buf, nbuf);
   if(buf[0] == 0) // EOF
     return -1;
   return 0;
@@ -402,9 +506,6 @@ subshellcmd(struct cmd *subcmd)
 }
 //PAGEBREAK!
 // Parsing
-
-char whitespace[] = " \t\r\n\v";
-char symbols[] = "<|>&;()";
 
 int
 gettoken(char **ps, char *es, char **q, char **eq)
