@@ -15,9 +15,19 @@
 #define SUBSHELL 6
 
 #define MAXARGS 10
+#define MAX_CMD_LEN 100
+#define MAX_HISTORY 10
+
+static char history[MAX_HISTORY][MAX_CMD_LEN];
+static int history_count = 0;
+static int history_next = 0;
+static int history_cursor = 0;
 
 char whitespace[] = " \t\r\n\v";
 char symbols[] = "<|>&;()";
+
+int history_up(char*, int);
+int history_down(char*, int);
 
 struct cmd {
   int type;
@@ -319,6 +329,24 @@ getshell(char *buf, int max)
       break;
     if(c == '\t')
       i = complete(buf, i, max);
+    else if(c == '\x1b'){
+      char c1, c2;
+      int cc1, cc2;
+      cc1 = read(0, &c1, 1);
+      cc2 = read(0, &c2, 1);
+      if(cc1 < 1 || cc2 < 1)
+        break;
+      if(c1 == '[' && (c2 == 'A' || c2 == 'B')){
+        int old_len = i;
+        while(old_len--)
+          write(2, "\b \b", 3);
+        if(c2 == 'A')
+          i = history_up(buf, i);
+        else
+          i = history_down(buf, i);
+        write(2, buf, i);
+      }
+    }
     else
       buf[i++] = c;
     if(c == '\n' || c == '\r')
@@ -384,10 +412,61 @@ freecmd(struct cmd *cmd)
   free(ecmd = (struct execcmd*)cmd);
 }
 
+void
+save_history(char *buf)
+{
+  int len = strlen(buf);
+  for(int i = 0;i < len;i++)
+    if(buf[i] == '\n' || buf[i] == '\r'){
+      buf[i] = '\0';
+      break;
+    }
+  int flag = 0;
+  for(int i = 0;buf[i] != '\0';i++)
+    if(strchr(whitespace, buf[i]) == 0){
+      flag = 1;
+      break;
+    }
+  if(!flag) return;
+  strcpy(history[history_next], buf);
+  history_next = (history_next + 1) % MAX_HISTORY;
+  if(history_count < MAX_HISTORY)
+    history_count++;
+  history_cursor = 0;
+}
+
+int
+history_up(char *buf, int len)
+{
+  if(history_count == 0)
+    return len;
+  if(history_cursor < history_count)
+    history_cursor++;
+  int index = (history_next - history_cursor + MAX_HISTORY) % MAX_HISTORY;
+  strcpy(buf, history[index]);
+  return strlen(buf);
+}
+
+int
+history_down(char *buf, int len)
+{
+  if(history_cursor == 0)
+    return len;
+  if(history_cursor == 1){
+    history_cursor--;
+    buf[0] = '\0';
+    return 0;
+  }
+  history_cursor--;
+  int index = (history_next - history_cursor + MAX_HISTORY) % MAX_HISTORY;
+  strcpy(buf, history[index]);
+  return strlen(buf);
+}
+
 int
 main(void)
 {
-  static char buf[100];
+  static char buf[MAX_CMD_LEN];
   int fd;
 
   // Ensure that three file descriptors are open.
@@ -400,6 +479,7 @@ main(void)
 
   // Read and run input commands.
   while(getcmd(buf, sizeof(buf)) >= 0){
+    save_history(buf);
     struct cmd *cmd = parsecmd(buf);
     runshellcmd(cmd);
     freecmd(cmd);

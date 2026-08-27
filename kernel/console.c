@@ -25,6 +25,8 @@
 #define BACKSPACE 0x100
 #define C(x)  ((x)-'@')  // Control-x
 
+static int esc_state;
+
 //
 // send one character to the uart.
 // called by printf, and to echo input characters,
@@ -159,6 +161,31 @@ consoleintr(int c)
     if(c != 0 && cons.e-cons.r < INPUT_BUF){
       c = (c == '\r') ? '\n' : c;
 
+      if(c == '\x1b' && esc_state == 0){
+        esc_state = 1;
+        break;
+      }
+
+      if(c == '[' && esc_state == 1){
+        esc_state = 2;
+        break;
+      }
+
+      if((c == 'A' || c == 'B') && esc_state == 2){
+        esc_state = 0;
+        if(cons.e - cons.r > INPUT_BUF - 3)
+          break;
+        cons.buf[cons.e++ % INPUT_BUF] = '\x1b';
+        cons.buf[cons.e++ % INPUT_BUF] = '[';
+        if(c == 'A')
+          cons.buf[cons.e++ % INPUT_BUF] = 'A';
+        else
+          cons.buf[cons.e++ % INPUT_BUF] = 'B';
+        cons.w = cons.e;
+        wakeup(&cons.r);
+        break;
+      }
+
       // echo back to the user.
       if(c != '\t')
         consputc(c);
@@ -172,6 +199,7 @@ consoleintr(int c)
         cons.w = cons.e;
         wakeup(&cons.r);
       }
+      esc_state = 0;
     }
     break;
   }
