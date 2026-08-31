@@ -142,6 +142,7 @@ consoleintr(int c)
   switch(c){
   case C('P'):  // Print process list.
     procdump();
+    esc_state = 0;
     break;
   case C('U'):  // Kill line.
     while(cons.e != cons.w &&
@@ -149,13 +150,20 @@ consoleintr(int c)
       cons.e--;
       consputc(BACKSPACE);
     }
+    esc_state = 0;
     break;
   case C('H'): // Backspace
   case '\x7f':
     if(cons.e != cons.w){
       cons.e--;
       consputc(BACKSPACE);
+    } else if(cons.e - cons.r < INPUT_BUF) {
+      cons.buf[(cons.e) % INPUT_BUF] = c;
+      cons.e++;
+      cons.w = cons.e;
+      wakeup(&cons.r);
     }
+    esc_state = 0;
     break;
   default:
     if(c != 0 && cons.e-cons.r < INPUT_BUF){

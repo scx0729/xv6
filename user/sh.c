@@ -22,6 +22,8 @@ static char history[MAX_HISTORY][MAX_CMD_LEN];
 static int history_count = 0;
 static int history_next = 0;
 static int history_cursor = 0;
+char history_draft[MAX_CMD_LEN];
+int history_draft_len = 0;
 
 char whitespace[] = " \t\r\n\v";
 char symbols[] = "<|>&;()";
@@ -347,8 +349,16 @@ getshell(char *buf, int max)
         write(2, buf, i);
       }
     }
-    else
+    else if(c == '\b' || c == '\x7f'){
+      if(i > 0){
+        buf[--i] = '\0';
+        write(2, "\b \b", 3);
+      }
+    }
+    else{
       buf[i++] = c;
+      buf[i] = '\0';
+    }
     if(c == '\n' || c == '\r')
       break;
   }
@@ -433,6 +443,8 @@ save_history(char *buf)
   if(history_count < MAX_HISTORY)
     history_count++;
   history_cursor = 0;
+  history_draft[0] = '\0';
+  history_draft_len = 0;
 }
 
 int
@@ -440,6 +452,10 @@ history_up(char *buf, int len)
 {
   if(history_count == 0)
     return len;
+  if(history_cursor == 0){
+    strcpy(history_draft, buf);
+    history_draft_len = len;
+  }
   if(history_cursor < history_count)
     history_cursor++;
   int index = (history_next - history_cursor + MAX_HISTORY) % MAX_HISTORY;
@@ -454,8 +470,8 @@ history_down(char *buf, int len)
     return len;
   if(history_cursor == 1){
     history_cursor--;
-    buf[0] = '\0';
-    return 0;
+    strcpy(buf, history_draft);
+    return history_draft_len;
   }
   history_cursor--;
   int index = (history_next - history_cursor + MAX_HISTORY) % MAX_HISTORY;
