@@ -8,6 +8,8 @@
 
 struct spinlock tickslock;
 uint ticks;
+uint64 loadavg = 0;
+struct spinlock loadavglock;
 
 extern char trampoline[], uservec[], userret[];
 
@@ -20,6 +22,7 @@ void
 trapinit(void)
 {
   initlock(&tickslock, "time");
+  initlock(&loadavglock, "loadavg");
 }
 
 // set up to take exceptions and traps while in the kernel.
@@ -164,8 +167,15 @@ clockintr()
 {
   acquire(&tickslock);
   ticks++;
+  uint local_ticks = ticks;
   wakeup(&ticks);
   release(&tickslock);
+  if(local_ticks % 10 == 0){
+    uint64 current = loadproc();
+    acquire(&loadavglock);
+    loadavg = (loadavg * 59 + current * 100) / 60;
+    release(&loadavglock);
+  }
 }
 
 // check if it's an external interrupt or software interrupt,
@@ -218,3 +228,11 @@ devintr()
   }
 }
 
+uint64
+getloadavg()
+{
+  acquire(&loadavglock);
+  uint64 value = loadavg;
+  release(&loadavglock);
+  return value;
+}

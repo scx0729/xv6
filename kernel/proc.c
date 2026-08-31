@@ -668,3 +668,15 @@ nproc(void){
   }
   return n;
 }
+
+uint64
+loadproc(void){
+  struct proc *p;
+  uint64 n = 0;
+  for(p = proc; p < &proc[NPROC]; p++){
+    acquire(&p->lock);
+    if(p->state == RUNNABLE || p->state == RUNNING) n++;
+    release(&p->lock);
+  }
+  return n;
+}

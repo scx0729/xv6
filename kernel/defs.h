@@ -106,6 +106,7 @@ int             either_copyout(int user_dst, uint64 dst, void *src, uint64 len);
 int             either_copyin(void *dst, int user_src, uint64 src, uint64 len);
 void            procdump(void);
 uint64          nproc(void);
+uint64          loadproc(void);
 
 // swtch.S
 void            swtch(struct context*, struct context*);
@@ -147,6 +148,7 @@ void            trapinit(void);
 void            trapinithart(void);
 extern struct spinlock tickslock;
 void            usertrapret(void);
+uint64          getloadavg(void);
 
 // uart.c
 void            uartinit(void);
