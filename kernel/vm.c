@@ -15,6 +15,8 @@ extern char etext[];  // kernel.ld sets this to end of kernel code.
 
 extern char trampoline[]; // trampoline.S
 
+static int mappages_super(pagetable_t, uint64, uint64, uint64, int);
+
 // Make a direct-map page table for the kernel.
 pagetable_t
 kvmmake(void)
@@ -97,6 +99,26 @@ walk(pagetable_t pagetable, uint64 va, int alloc)
   return &pagetable[PX(0, va)];
 }
 
+static pte_t *
+walk_super(pagetable_t pagetable, uint64 va, int alloc)
+{
+  if(va >= MAXVA)
+    panic("walk_super");
+
+  pte_t *pte = &pagetable[PX(2, va)];
+  if(*pte & PTE_V) {
+    if(*pte & PTE_R || *pte & PTE_W || *pte & PTE_X)
+      panic("walk_super");
+    pagetable = (pagetable_t)PTE2PA(*pte);
+  } else {
+    if(!alloc || (pagetable = (pde_t*)kalloc()) == 0)
+      return 0;
+    memset(pagetable, 0, PGSIZE);
+    *pte = PA2PTE(pagetable) | PTE_V;
+  }
+  return &pagetable[PX(1, va)];
+}
+
 // Look up a virtual address, return the physical address,
 // or 0 if not mapped.
 // Can only be used to look up user pages.
@@ -126,6 +148,11 @@ walkaddr(pagetable_t pagetable, uint64 va)
 void
 kvmmap(pagetable_t kpgtbl, uint64 va, uint64 pa, uint64 sz, int perm)
 {
+  if(va == PLIC){
+    if(mappages_super(kpgtbl, va, sz, pa, perm) != 0)
+      panic("kvmmap");
+    return;
+  }
   if(mappages(kpgtbl, va, sz, pa, perm) != 0)
     panic("kvmmap");
 }
@@ -155,6 +182,27 @@ mappages(pagetable_t pagetable, uint64 va, uint64 size, uint64 pa, int perm)
       break;
     a += PGSIZE;
     pa += PGSIZE;
+  }
+  return 0;
+}
+
+static int
+mappages_super(pagetable_t pagetable, uint64 va, uint64 size, uint64 pa, int perm)
+{
+  uint64 a;
+  pte_t *pte;
+
+  if(size == 0)
+    panic("mappages_super: size");
+  if((va % SUPERPGSIZE != 0) || (pa % SUPERPGSIZE != 0) || (size % SUPERPGSIZE != 0))
+    panic("mappages_super: va || pa || size");
+  for(a = va;a < va + size;a += SUPERPGSIZE){
+    if((pte = walk_super(pagetable, a, 1)) == 0)
+      return -1;
+    if(*pte & PTE_V)
+      panic("mappages_super: remap");
+    *pte = PA2PTE(pa) | perm | PTE_V;
+    pa += SUPERPGSIZE;
   }
   return 0;
 }
