@@ -676,6 +676,14 @@ procdump(void)
 
 int pgaccess(void *base, int len, void *mask){
   struct proc *p = myproc();
+  uint64 start = (uint64)base;
+  uint64 bytes = (uint64)len * PGSIZE;
+  if(len < 0 || len > 32)
+    return -1;
+  if(start >= MAXVA || bytes > MAXVA - start)
+    return -1;
+  if(start + bytes > PGROUNDUP(p->sz))
+    return -1;
   unsigned int abits = 0;
   for(int i = 0; i < len; i++){
     uint64 addr = (uint64)base + i * PGSIZE;
@@ -684,11 +692,45 @@ int pgaccess(void *base, int len, void *mask){
       return -1;
     if((*pte & PTE_V) == 0)
       return -1;
+    if((*pte & PTE_U) == 0)
+      return -1;
     if(*pte & PTE_A)
-      abits = (abits | (1 << i));
+      abits = (abits | (1U << i));
     *pte = *pte & ~(PTE_A);
   }
+  sfence_vma();
   if(copyout(p->pagetable, (uint64)mask, (char *)&abits, sizeof(abits)) < 0)
+    return -1;
+  return 0;
+}
+
+int pgdirty(void *base, int len, void *mask)
+{
+  struct proc *p = myproc();
+  uint64 start = (uint64)base;
+  uint64 bytes = (uint64)len * PGSIZE;
+  if(len < 0 || len > 32)
+    return -1;
+  if(start >= MAXVA || bytes > MAXVA - start)
+    return -1;
+  if(start + bytes > PGROUNDUP(p->sz))
+    return -1;
+  unsigned int dbits = 0;
+  for(int i = 0; i < len; i++){
+    uint64 addr = (uint64)base + i * PGSIZE;
+    pte_t *pte = walk(p->pagetable, addr, 0);
+    if(pte == 0)
+      return -1;
+    if((*pte & PTE_V) == 0)
+      return -1;
+    if((*pte & PTE_U) == 0)
+      return -1;
+    if(*pte & PTE_D)
+      dbits = (dbits | (1U << i));
+    *pte = *pte & ~(PTE_D);
+  }
+  sfence_vma();
+  if(copyout(p->pagetable, (uint64)mask, (char *)&dbits, sizeof(dbits)) < 0)
     return -1;
   return 0;
 }
