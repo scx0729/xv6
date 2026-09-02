@@ -85,6 +85,7 @@ AS = $(TOOLPREFIX)gas
 LD = $(TOOLPREFIX)ld
 OBJCOPY = $(TOOLPREFIX)objcopy
 OBJDUMP = $(TOOLPREFIX)objdump
+NM = $(TOOLPREFIX)nm
 
 CFLAGS = -Wall -Werror -O -fno-omit-frame-pointer -ggdb
 
@@ -125,6 +126,14 @@ $K/kernel: $(OBJS) $(OBJS_KCSAN) $K/kernel.ld $U/initcode
 	$(OBJDUMP) -t $K/kernel | sed '1,/SYMBOL TABLE/d; s/ .* / /; /^$$/d' > $K/kernel.sym
 
 $(OBJS): EXTRAFLAG := $(KCSANFLAG)
+
+$K/ksyms.inc:
+	@printf '  {0, 0, "unknown"},\n' > $@
+
+$K/klines.inc:
+	@printf '  {0, "unknown", 0},\n' > $@
+
+$K/printf.o: $K/ksyms.inc $K/klines.inc
 
 $K/%.o: $K/%.c
 	$(CC) $(CFLAGS) $(EXTRAFLAG) -c -o $@ $<
@@ -270,6 +279,7 @@ clean:
 	rm -f *.tex *.dvi *.idx *.aux *.log *.ind *.ilg \
 	*/*.o */*.d */*.asm */*.sym \
 	$U/initcode $U/initcode.out $K/kernel fs.img \
+	$K/ksyms.inc $K/klines.inc \
 	mkfs/mkfs .gdbinit \
         $U/usys.S \
 	$(UPROGS) \
@@ -300,12 +310,18 @@ QEMUOPTS += -device e1000,netdev=net0,bus=pcie.0
 endif
 
 qemu: $K/kernel fs.img
+	$(MAKE) ksyms
+	$(MAKE) klines
+	$(MAKE) $K/kernel
 	$(QEMU) $(QEMUOPTS)
 
 .gdbinit: .gdbinit.tmpl-riscv
 	sed "s/:1234/:$(GDBPORT)/" < $^ > $@
 
 qemu-gdb: $K/kernel .gdbinit fs.img
+	$(MAKE) ksyms
+	$(MAKE) klines
+	$(MAKE) $K/kernel
 	@echo "*** Now run 'gdb' in another window." 1>&2
 	$(QEMU) $(QEMUOPTS) -S $(QEMUGDB)
 
@@ -408,3 +424,11 @@ myapi.key:
 
 
 .PHONY: handin tarball tarball-pref clean grade handin-check
+
+.PHONY: ksyms klines
+
+ksyms: $K/kernel
+	$(NM) -n -S $K/kernel | awk '$$3 == "T" || $$3 == "t" { start = strtonum("0x" $$1); size = strtonum("0x" $$2); printf("  {0x%016x, 0x%016x, \"%s\"},\n", start, start + size, $$4); }' > $K/ksyms.inc
+
+klines: $K/kernel
+	$(OBJDUMP) --dwarf=decodedline $K/kernel | awk '$$2 ~ /^[0-9]+$$/ && $$3 ~ /^0x/ { printf("  {%s, \"%s\", %s},\n", $$3, $$1, $$2); }' > $K/klines.inc

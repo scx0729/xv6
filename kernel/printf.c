@@ -23,6 +23,26 @@ static struct {
   int locking;
 } pr;
 
+struct ksym {
+  uint64 start;
+  uint64 end;
+  char *name;
+};
+
+static struct ksym symbols[] = {
+  #include "ksyms.inc"
+};
+
+struct kline {
+  uint64 addr;
+  char *file;
+  int line;
+};
+
+static struct kline lines[] = {
+  #include "klines.inc"
+};
+
 static char digits[] = "0123456789abcdef";
 
 static void
@@ -134,6 +154,28 @@ printfinit(void)
   pr.locking = 1;
 }
 
+static char *
+find_function(uint64 ra)
+{
+  for(int i = 0;i < NELEM(symbols);i++){
+    if(ra - 1 >= symbols[i].start && ra - 1 < symbols[i].end)
+      return symbols[i].name;
+  }
+  return "unknown";
+}
+
+static struct kline *
+find_line(uint64 ra)
+{
+  struct kline *best = 0;
+  for(int i = 0; i < NELEM(lines); i++){
+    if(lines[i].addr <= ra &&
+        (best == 0 || lines[i].addr >= best->addr))
+      best = &lines[i];
+  }
+  return best;
+}
+
 void
 backtrace(void)
 {
@@ -144,7 +186,12 @@ backtrace(void)
   while(fp >= down + 16 && fp < up){
     uint64 ra = *(uint64 *)(fp - 8);
     uint64 s0 = *(uint64 *)(fp - 16);
-    printf("%p\n", ra);
+    char *name = find_function(ra);
+    struct kline *line = find_line(ra);
+    if(line != 0)
+      printf("%p %s %s:%d\n", ra, name, line->file, line->line);
+    else
+      printf("%p %s unknown:0\n", ra, name);
     fp = s0;
   }
   
