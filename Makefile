@@ -188,8 +188,8 @@ UPROGS=\
 	$U/_grind\
 	$U/_wc\
 	$U/_zombie\
-
-
+	$U/_cowmeasure\
+	$U/_cowopt\
 
 
 ifeq ($(LAB),$(filter $(LAB), lock))

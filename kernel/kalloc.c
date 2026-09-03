@@ -106,3 +106,17 @@ kalloc(void)
     memset((char*)r, 5, PGSIZE); // fill with junk
   return (void*)r;
 }
+
+int
+krefget(uint64 pa)
+{
+  pa = PGROUNDDOWN(pa);
+  if(pa < end || pa >= PHYSTOP)
+    return -1;
+  int index = PA_INDEX(pa);
+  int cnt = 0;
+  acquire(&kmem.lock);
+  cnt = kmem.refcount[index];
+  release(&kmem.lock);
+  return cnt;
+}

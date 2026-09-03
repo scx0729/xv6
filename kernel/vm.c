@@ -17,6 +17,12 @@ extern char etext[];  // kernel.ld sets this to end of kernel code.
 
 extern char trampoline[]; // trampoline.S
 
+struct {
+  struct spinlock lock;
+  uint64 base_pages;
+  uint64 cow_pages;
+} stat;
+
 // Make a direct-map page table for the kernel.
 pagetable_t
 kvmmake(void)
@@ -65,6 +71,14 @@ kvminithart()
 {
   w_satp(MAKE_SATP(kernel_pagetable));
   sfence_vma();
+}
+
+void
+statinit(void)
+{
+  nitlock(&stat.lock, "stat");
+  stat.base_pages = 0;
+  uint64 cow_pages = 0;
 }
 
 // Return the address of the PTE in page table pagetable
@@ -299,11 +313,19 @@ int cowalloc(pagetable_t pagetable, uint64 va)
   if(pte == 0 || (*pte & PTE_V) == 0 || (*pte & PTE_U) == 0 || (*pte & PTE_COW) == 0)
     return -1;
   uint64 old_pa = PTE2PA(*pte);
+  if(krefget(old_pa) == 1){
+    *pte = (*pte & ~PTE_COW) | PTE_W;
+    sfence_vma();
+    return 0;
+  }
   uint flags = PTE_FLAGS(*pte);
   char *mem = kalloc();
   if(mem == 0)
     return -1;
   memmove(mem, (void*)old_pa, PGSIZE);
+  acquire(&stat.lock);
+  stat.cow_pages++;
+  release(&stat.lock);
   flags = (flags & ~PTE_COW) | PTE_W;
   *pte = PA2PTE(mem) | flags;
   kfree((void*)old_pa);
@@ -323,11 +345,13 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
   pte_t *pte;
   uint64 pa, i;
   uint flags;
+  uint64 cnt = 0;
   for(i = 0; i < sz; i += PGSIZE){
     if((pte = walk(old, i, 0)) == 0)
       continue;
     if((*pte & PTE_V) == 0)
       continue;
+    cnt++;
     pa = PTE2PA(*pte);
     flags = PTE_FLAGS(*pte);
     if(flags & PTE_W)
@@ -339,11 +363,41 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
       *pte = (*pte & ~PTE_W) | PTE_COW;
     krefinc(pa);
   }
+  acquire(&stat.lock);
+  stat.base_pages += cnt;
+  release(&stat.lock);
   return 0;
 
  err:
   uvmunmap(new, 0, i / PGSIZE, 1);
   return -1;
+}
+
+void
+cowstat(void)
+{
+  uint64 base, cow;
+
+  acquire(&stat.lock);
+  base = stat.base_pages;
+  cow = stat.cow_pages;
+  release(&stat.lock);
+
+  printf("base pages: %ld\n", base);
+  printf("cow pages: %ld\n", cow);
+  printf("saved pages: %ld\n", base - cow);
+  printf("saved bytes: %ld\n", (base - cow) * PGSIZE);
+}
+
+void
+cowreset(void)
+{
+  acquire(&stat.lock);
+
+  stat.base_pages = 0;
+  stat.cow_pages = 0;
+
+  release(&stat.lock);
 }
 
 // mark a PTE invalid for user access.
