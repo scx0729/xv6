@@ -65,10 +65,31 @@ usertrap(void)
     intr_on();
 
     syscall();
-  } else if (r_scause() == 15){
+  } else if (r_scause() == 13 || r_scause() == 15){
     uint64 va = r_stval();
-    if(va >= p->sz || cowalloc(p->pagetable, va) < 0)
+    va = PGROUNDDOWN(va);
+    if(va >= MAXVA)
       p->killed = 1;
+    else {
+      pte_t *pte = walk(p->pagetable, va, 0);
+      if(r_scause() == 15 && va < p->sz && (pte != 0) && (*pte & PTE_V) && (*pte & PTE_U) && (*pte & PTE_COW)){
+        if(cowalloc(p->pagetable, va) < 0)
+          p->killed = 1;
+      } else if(va < p->sz && (pte == 0 || (*pte & PTE_V) == 0)){
+        char *mem;
+        mem = kalloc();
+        if(mem == 0)
+          p->killed = 1;
+        else {
+          memset(mem, 0, PGSIZE);
+          if(mappages(p->pagetable, va, PGSIZE, (uint64)mem, PTE_W|PTE_R|PTE_U) != 0){
+            kfree(mem);
+            p->killed = 1;
+          }
+        }
+      } else 
+        p->killed = 1;
+    }
   } else if((which_dev = devintr()) != 0){
     // ok
   } else {
