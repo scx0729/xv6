@@ -173,8 +173,10 @@ int             copyout(pagetable_t, uint64, char *, uint64);
 int             copyin(pagetable_t, char *, uint64, uint64);
 int             copyinstr(pagetable_t, char *, uint64, uint64);
 int             cowalloc(pagetable_t, uint64);
-void            cowstat(void);
+uint64          cowstat(int);
 void            cowreset(void);
+void            statinit(void);
+pte_t*          walk(pagetable_t, uint64, int);
 
 // plic.c
 void            plicinit(void);

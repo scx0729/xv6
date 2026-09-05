@@ -102,8 +102,10 @@ sys_uptime(void)
 uint64
 sys_cowstat(void)
 {
-  cowstat();
-  return 0;
+  int kind;
+  if(argint(0, &kind) < 0)
+    return -1;
+  return cowstat(kind);
 }
 
 uint64

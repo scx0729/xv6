@@ -16,6 +16,7 @@ int nextpid = 1;
 struct spinlock pid_lock;
 
 extern void forkret(void);
+static void freeprocresources(struct proc *p);
 static void freeproc(struct proc *p);
 
 extern char trampoline[]; // trampoline.S
@@ -144,11 +145,8 @@ found:
   return p;
 }
 
-// free a proc structure and the data hanging from it,
-// including user pages.
-// p->lock must be held.
 static void
-freeproc(struct proc *p)
+freeprocresources(struct proc *p)
 {
   if(p->trapframe)
     kfree((void*)p->trapframe);
@@ -157,12 +155,22 @@ freeproc(struct proc *p)
     proc_freepagetable(p->pagetable, p->sz);
   p->pagetable = 0;
   p->sz = 0;
+}
+
+// free a proc structure and the data hanging from it,
+// including user pages.
+// p->lock must be held.
+static void
+freeproc(struct proc *p)
+{
+  freeprocresources(p);
   p->pid = 0;
   p->parent = 0;
   p->name[0] = 0;
   p->chan = 0;
   p->killed = 0;
   p->xstate = 0;
+  p->cowtrack = 0;
   p->state = UNUSED;
 }
 
@@ -288,6 +296,7 @@ fork(void)
     return -1;
   }
   np->sz = p->sz;
+  np->cowtrack = p->cowtrack;
 
   // copy saved user registers.
   *(np->trapframe) = *(p->trapframe);
@@ -401,6 +410,7 @@ wait(uint64 addr)
         if(np->state == ZOMBIE){
           // Found one.
           pid = np->pid;
+          freeprocresources(np);
           if(addr != 0 && copyout(p->pagetable, addr, (char *)&np->xstate,
                                   sizeof(np->xstate)) < 0) {
             release(&np->lock);

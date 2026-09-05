@@ -111,7 +111,7 @@ int
 krefget(uint64 pa)
 {
   pa = PGROUNDDOWN(pa);
-  if(pa < end || pa >= PHYSTOP)
+  if((char*)pa < end || pa >= PHYSTOP)
     return -1;
   int index = PA_INDEX(pa);
   int cnt = 0;

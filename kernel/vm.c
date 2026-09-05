@@ -7,6 +7,7 @@
 #include "fs.h"
 #include "spinlock.h"
 #include "proc.h"
+#include "cow.h"
 
 /*
  * the kernel's page table.
@@ -76,9 +77,9 @@ kvminithart()
 void
 statinit(void)
 {
-  nitlock(&stat.lock, "stat");
+  initlock(&stat.lock, "stat");
   stat.base_pages = 0;
-  uint64 cow_pages = 0;
+  stat.cow_pages = 0;
 }
 
 // Return the address of the PTE in page table pagetable
@@ -309,6 +310,7 @@ uvmfree(pagetable_t pagetable, uint64 sz)
 
 int cowalloc(pagetable_t pagetable, uint64 va)
 {
+  struct proc *p = myproc();
   pte_t *pte = walk(pagetable, va, 0);
   if(pte == 0 || (*pte & PTE_V) == 0 || (*pte & PTE_U) == 0 || (*pte & PTE_COW) == 0)
     return -1;
@@ -323,9 +325,11 @@ int cowalloc(pagetable_t pagetable, uint64 va)
   if(mem == 0)
     return -1;
   memmove(mem, (void*)old_pa, PGSIZE);
-  acquire(&stat.lock);
-  stat.cow_pages++;
-  release(&stat.lock);
+  if(p != 0 && p->pagetable == pagetable && p->cowtrack){
+    acquire(&stat.lock);
+    stat.cow_pages++;
+    release(&stat.lock);
+  }
   flags = (flags & ~PTE_COW) | PTE_W;
   *pte = PA2PTE(mem) | flags;
   kfree((void*)old_pa);
@@ -342,6 +346,7 @@ int cowalloc(pagetable_t pagetable, uint64 va)
 int
 uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
 {
+  struct proc *p = myproc();
   pte_t *pte;
   uint64 pa, i;
   uint flags;
@@ -363,9 +368,11 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
       *pte = (*pte & ~PTE_W) | PTE_COW;
     krefinc(pa);
   }
-  acquire(&stat.lock);
-  stat.base_pages += cnt;
-  release(&stat.lock);
+  if(p != 0 && p->cowtrack){
+    acquire(&stat.lock);
+    stat.base_pages += cnt;
+    release(&stat.lock);
+  }
   return 0;
 
  err:
@@ -373,31 +380,31 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
   return -1;
 }
 
-void
-cowstat(void)
+uint64
+cowstat(int kind)
 {
-  uint64 base, cow;
+  uint64 value;
 
   acquire(&stat.lock);
-  base = stat.base_pages;
-  cow = stat.cow_pages;
+  if(kind == COWSTAT_BASE_PAGES)
+    value = stat.base_pages;
+  else if(kind == COWSTAT_COPIED_PAGES)
+    value = stat.cow_pages;
+  else
+    value = -1;
   release(&stat.lock);
-
-  printf("base pages: %ld\n", base);
-  printf("cow pages: %ld\n", cow);
-  printf("saved pages: %ld\n", base - cow);
-  printf("saved bytes: %ld\n", (base - cow) * PGSIZE);
+  return value;
 }
 
 void
 cowreset(void)
 {
+  struct proc *p = myproc();
   acquire(&stat.lock);
-
   stat.base_pages = 0;
   stat.cow_pages = 0;
-
   release(&stat.lock);
+  p->cowtrack = 1;
 }
 
 // mark a PTE invalid for user access.
