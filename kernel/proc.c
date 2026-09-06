@@ -18,6 +18,10 @@ struct spinlock pid_lock;
 extern void forkret(void);
 static void freeproc(struct proc *p);
 
+static struct thread_group* group_alloc();
+static void group_hold(struct thread_group*);
+static void group_put(struct thread_group*);
+
 extern char trampoline[]; // trampoline.S
 
 // helps ensure that wakeups of wait()ing
@@ -53,6 +57,7 @@ procinit(void)
   for(p = proc; p < &proc[NPROC]; p++) {
       initlock(&p->lock, "proc");
       p->kstack = KSTACK((int) (p - proc));
+      p->trapframe_va = TRAPFRAME - (p - proc)*PGSIZE;
   }
 }
 
@@ -102,7 +107,7 @@ allocpid() {
 // and return with p->lock held.
 // If there are no free procs, or a memory allocation fails, return 0.
 static struct proc*
-allocproc(void)
+allocproc(int is_thread)
 {
   struct proc *p;
 
@@ -119,6 +124,7 @@ allocproc(void)
 found:
   p->pid = allocpid();
   p->state = USED;
+  p->is_thread = is_thread;
 
   // Allocate a trapframe page.
   if((p->trapframe = (struct trapframe *)kalloc()) == 0){
@@ -127,12 +133,19 @@ found:
     return 0;
   }
 
-  // An empty user page table.
-  p->pagetable = proc_pagetable(p);
-  if(p->pagetable == 0){
-    freeproc(p);
-    release(&p->lock);
-    return 0;
+  if(is_thread == 0){
+    // A new process owns a new group and user page table.
+    if((p->group = group_alloc()) == 0){
+      freeproc(p);
+      release(&p->lock);
+      return 0;
+    }
+    p->group->pagetable = proc_pagetable(p);
+    if(p->group->pagetable == 0){
+      freeproc(p);
+      release(&p->lock);
+      return 0;
+    }
   }
 
   // Set up new context to start executing at forkret,
@@ -150,13 +163,16 @@ found:
 static void
 freeproc(struct proc *p)
 {
+  if(p->group && p->group->pagetable)
+    uvmunmap(p->group->pagetable, p->trapframe_va, 1, 0);
   if(p->trapframe)
     kfree((void*)p->trapframe);
   p->trapframe = 0;
-  if(p->pagetable)
-    proc_freepagetable(p->pagetable, p->sz);
-  p->pagetable = 0;
-  p->sz = 0;
+  if(p->group){
+    struct thread_group *group = p->group;
+    p->group = 0;
+    group_put(group);
+  }
   p->pid = 0;
   p->parent = 0;
   p->name[0] = 0;
@@ -164,6 +180,7 @@ freeproc(struct proc *p)
   p->killed = 0;
   p->xstate = 0;
   p->state = UNUSED;
+  p->is_thread = 0;
 }
 
 // Create a user page table for a given process,
@@ -189,7 +206,7 @@ proc_pagetable(struct proc *p)
   }
 
   // map the trapframe just below TRAMPOLINE, for trampoline.S.
-  if(mappages(pagetable, TRAPFRAME, PGSIZE,
+  if(mappages(pagetable, p->trapframe_va, PGSIZE,
               (uint64)(p->trapframe), PTE_R | PTE_W) < 0){
     uvmunmap(pagetable, TRAMPOLINE, 1, 0);
     uvmfree(pagetable, 0);
@@ -205,7 +222,6 @@ void
 proc_freepagetable(pagetable_t pagetable, uint64 sz)
 {
   uvmunmap(pagetable, TRAMPOLINE, 1, 0);
-  uvmunmap(pagetable, TRAPFRAME, 1, 0);
   uvmfree(pagetable, sz);
 }
 
@@ -227,13 +243,13 @@ userinit(void)
 {
   struct proc *p;
 
-  p = allocproc();
+  p = allocproc(0);
   initproc = p;
   
   // allocate one user page and copy init's instructions
   // and data into it.
-  uvminit(p->pagetable, initcode, sizeof(initcode));
-  p->sz = PGSIZE;
+  uvminit(p->group->pagetable, initcode, sizeof(initcode));
+  p->group->sz = PGSIZE;
 
   // prepare for the very first "return" from kernel to user.
   p->trapframe->epc = 0;      // user program counter
@@ -255,15 +271,15 @@ growproc(int n)
   uint sz;
   struct proc *p = myproc();
 
-  sz = p->sz;
+  sz = p->group->sz;
   if(n > 0){
-    if((sz = uvmalloc(p->pagetable, sz, sz + n)) == 0) {
+    if((sz = uvmalloc(p->group->pagetable, sz, sz + n)) == 0) {
       return -1;
     }
   } else if(n < 0){
-    sz = uvmdealloc(p->pagetable, sz, sz + n);
+    sz = uvmdealloc(p->group->pagetable, sz, sz + n);
   }
-  p->sz = sz;
+  p->group->sz = sz;
   return 0;
 }
 
@@ -277,17 +293,17 @@ fork(void)
   struct proc *p = myproc();
 
   // Allocate process.
-  if((np = allocproc()) == 0){
+  if((np = allocproc(0)) == 0){
     return -1;
   }
 
   // Copy user memory from parent to child.
-  if(uvmcopy(p->pagetable, np->pagetable, p->sz) < 0){
+  if(uvmcopy(p->group->pagetable, np->group->pagetable, p->group->sz) < 0){
     freeproc(np);
     release(&np->lock);
     return -1;
   }
-  np->sz = p->sz;
+  np->group->sz = p->group->sz;
 
   // copy saved user registers.
   *(np->trapframe) = *(p->trapframe);
@@ -401,7 +417,7 @@ wait(uint64 addr)
         if(np->state == ZOMBIE){
           // Found one.
           pid = np->pid;
-          if(addr != 0 && copyout(p->pagetable, addr, (char *)&np->xstate,
+          if(addr != 0 && copyout(p->group->pagetable, addr, (char *)&np->xstate,
                                   sizeof(np->xstate)) < 0) {
             release(&np->lock);
             release(&wait_lock);
@@ -604,7 +620,7 @@ either_copyout(int user_dst, uint64 dst, void *src, uint64 len)
 {
   struct proc *p = myproc();
   if(user_dst){
-    return copyout(p->pagetable, dst, src, len);
+    return copyout(p->group->pagetable, dst, src, len);
   } else {
     memmove((char *)dst, src, len);
     return 0;
@@ -619,7 +635,7 @@ either_copyin(void *dst, int user_src, uint64 src, uint64 len)
 {
   struct proc *p = myproc();
   if(user_src){
-    return copyin(p->pagetable, dst, src, len);
+    return copyin(p->group->pagetable, dst, src, len);
   } else {
     memmove(dst, (char*)src, len);
     return 0;
@@ -653,4 +669,83 @@ procdump(void)
     printf("%d %s %s", p->pid, state, p->name);
     printf("\n");
   }
+}
+
+static struct thread_group*
+group_alloc()
+{
+  struct thread_group *group;
+  if((group = (struct thread_group *)kalloc()) == 0)
+    return 0;
+  memset(group, 0, PGSIZE);
+  initlock(&group->lock, "group");
+  group->refcount = 1;
+  return group;
+}
+
+static void
+group_hold(struct thread_group *group)
+{
+  acquire(&group->lock);
+  group->refcount++;
+  release(&group->lock);
+}
+
+static void
+group_put(struct thread_group *group)
+{
+  int flag = 0;
+  acquire(&group->lock);
+  if(group->refcount < 1)
+    panic("group");
+  if(--group->refcount == 0)
+    flag = 1;
+  release(&group->lock);
+  if(flag){
+    if(group->pagetable)
+      proc_freepagetable(group->pagetable, group->sz);
+    kfree(group);
+  }
+}
+
+int kthread_create(uint64 start, uint64 arg, uint64 stack_top)
+{
+  struct proc *p = myproc();
+  struct proc *np = allocproc(1);
+  if(np == 0)
+    return -1;
+  group_hold(p->group);
+  np->group = p->group;
+  acquire(&np->group->lock);
+  if(mappages(np->group->pagetable, np->trapframe_va, PGSIZE, (uint64)(np->trapframe), PTE_R | PTE_W) < 0){
+    struct thread_group *group = np->group;
+    np->group = 0;
+    release(&group->lock);
+    group_put(group);
+    freeproc(np);
+    release(&np->lock);
+    return -1;
+  }
+  release(&np->group->lock);
+  memset(np->trapframe, 0, PGSIZE);
+  np->trapframe->epc = start;
+  np->trapframe->sp = stack_top;
+  np->trapframe->a0 = arg;
+  np->state = RUNNABLE;
+  release(&np->lock);
+  return np->pid;
+}
+void kthread_exit(int status)
+{
+  struct proc *p = myproc();
+  wakeup(p->chan);
+  acquire(&p->lock);
+  p->xstate = status;
+  p->state = ZOMBIE;
+  release(&p->thread_lock);
+  sched();
+}
+int kthread_join(int tid, uint64 status_addr)
+{
+  return -1;
 }

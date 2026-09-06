@@ -46,7 +46,7 @@ sys_sbrk(void)
 
   if(argint(0, &n) < 0)
     return -1;
-  addr = myproc()->sz;
+  addr = myproc()->group->sz;
   if(growproc(n) < 0)
     return -1;
   return addr;
@@ -94,4 +94,33 @@ sys_uptime(void)
   xticks = ticks;
   release(&tickslock);
   return xticks;
+}
+
+uint64
+sys_kthread_create()
+{
+  uint64 start, arg, stack_top;
+  if(argaddr(0, &start) < 0 || argaddr(1, &arg) < 0 || argaddr(2, &stack_top) < 0)
+    return -1;
+  return kthread_create(start, arg, stack_top);
+}
+
+uint64
+sys_kthread_exit()
+{
+  int status;
+  if(argint(0, &status) < 0)
+    return -1;
+  kthread_exit(status);
+  return 0;
+}
+
+uint64
+sys_kthread_join()
+{
+  int tid;
+  uint64 status_addr;
+  if(argint(0, &tid) < 0 || argaddr(1, &status_addr) < 0)
+    return -1;
+  return kthread_join(tid, status_addr);
 }

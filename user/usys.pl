@@ -36,3 +36,6 @@ entry("getpid");
 entry("sbrk");
 entry("sleep");
 entry("uptime");
+entry("kthread_create");
+entry("kthread_exit");
+entry("kthread_join");
