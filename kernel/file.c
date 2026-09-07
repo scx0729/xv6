@@ -94,7 +94,10 @@ filestat(struct file *f, uint64 addr)
     ilock(f->ip);
     stati(f->ip, &st);
     iunlock(f->ip);
-    if(copyout(p->group->pagetable, addr, (char *)&st, sizeof(st)) < 0)
+    acquire(&p->group->lock);
+    int ret = copyout(p->group->pagetable, addr, (char *)&st, sizeof(st));
+    release(&p->group->lock);
+    if(ret < 0)
       return -1;
     return 0;
   }
@@ -179,4 +182,3 @@ filewrite(struct file *f, uint64 addr, int n)
 
   return ret;
 }
-

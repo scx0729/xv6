@@ -12,9 +12,16 @@ int
 fetchaddr(uint64 addr, uint64 *ip)
 {
   struct proc *p = myproc();
-  if(addr >= p->group->sz || addr+sizeof(uint64) > p->group->sz)
+  int ret;
+
+  acquire(&p->group->lock);
+  if(addr >= p->group->sz || addr+sizeof(uint64) > p->group->sz){
+    release(&p->group->lock);
     return -1;
-  if(copyin(p->group->pagetable, (char *)ip, addr, sizeof(*ip)) != 0)
+  }
+  ret = copyin(p->group->pagetable, (char *)ip, addr, sizeof(*ip));
+  release(&p->group->lock);
+  if(ret != 0)
     return -1;
   return 0;
 }
@@ -25,7 +32,10 @@ int
 fetchstr(uint64 addr, char *buf, int max)
 {
   struct proc *p = myproc();
-  int err = copyinstr(p->group->pagetable, buf, addr, max);
+  int err;
+  acquire(&p->group->lock);
+  err = copyinstr(p->group->pagetable, buf, addr, max);
+  release(&p->group->lock);
   if(err < 0)
     return err;
   return strlen(buf);

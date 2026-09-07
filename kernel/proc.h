@@ -88,12 +88,13 @@ struct thread_group {
 
   uint64 sz;                   // Size of process memory (bytes)
   pagetable_t pagetable;       // User page table
+  struct file *ofile[NOFILE];  // Open files shared by the threads
+  struct inode *cwd;            // Current directory shared by the threads
 };
 
 // Per-process state
 struct proc {
   struct spinlock lock;
-  struct spinlock thread_lock;
 
   // p->lock must be held when using these:
   enum procstate state;        // Process state
@@ -110,9 +111,11 @@ struct proc {
   struct trapframe *trapframe; // data page for trampoline.S
   uint64 trapframe_va;
   struct context context;      // swtch() here to run process
-  struct file *ofile[NOFILE];  // Open files
-  struct inode *cwd;           // Current directory
   char   name[16];               // Process name (debugging)
   struct thread_group *group;
   int    is_thread;
+  struct proc *joiner;
 };
+
+extern struct proc proc[NPROC];
+extern struct spinlock thread_lock;

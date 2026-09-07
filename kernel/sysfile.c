@@ -23,10 +23,18 @@ argfd(int n, int *pfd, struct file **pf)
 {
   int fd;
   struct file *f;
+  struct proc *p = myproc();
 
   if(argint(n, &fd) < 0)
     return -1;
-  if(fd < 0 || fd >= NOFILE || (f=myproc()->ofile[fd]) == 0)
+  if(fd < 0 || fd >= NOFILE)
+    return -1;
+  acquire(&p->group->lock);
+  f = p->group->ofile[fd];
+  if(f)
+    filedup(f); // Pin the file while the caller uses it.
+  release(&p->group->lock);
+  if(f == 0)
     return -1;
   if(pfd)
     *pfd = fd;
@@ -43,12 +51,15 @@ fdalloc(struct file *f)
   int fd;
   struct proc *p = myproc();
 
+  acquire(&p->group->lock);
   for(fd = 0; fd < NOFILE; fd++){
-    if(p->ofile[fd] == 0){
-      p->ofile[fd] = f;
+    if(p->group->ofile[fd] == 0){
+      p->group->ofile[fd] = f;
+      release(&p->group->lock);
       return fd;
     }
   }
+  release(&p->group->lock);
   return -1;
 }
 
@@ -60,9 +71,10 @@ sys_dup(void)
 
   if(argfd(0, 0, &f) < 0)
     return -1;
-  if((fd=fdalloc(f)) < 0)
+  if((fd=fdalloc(f)) < 0){
+    fileclose(f);
     return -1;
-  filedup(f);
+  }
   return fd;
 }
 
@@ -73,9 +85,15 @@ sys_read(void)
   int n;
   uint64 p;
 
-  if(argfd(0, 0, &f) < 0 || argint(2, &n) < 0 || argaddr(1, &p) < 0)
+  if(argfd(0, 0, &f) < 0)
     return -1;
-  return fileread(f, p, n);
+  if(argint(2, &n) < 0 || argaddr(1, &p) < 0){
+    fileclose(f);
+    return -1;
+  }
+  int ret = fileread(f, p, n);
+  fileclose(f);
+  return ret;
 }
 
 uint64
@@ -85,10 +103,16 @@ sys_write(void)
   int n;
   uint64 p;
 
-  if(argfd(0, 0, &f) < 0 || argint(2, &n) < 0 || argaddr(1, &p) < 0)
+  if(argfd(0, 0, &f) < 0)
     return -1;
+  if(argint(2, &n) < 0 || argaddr(1, &p) < 0){
+    fileclose(f);
+    return -1;
+  }
 
-  return filewrite(f, p, n);
+  int ret = filewrite(f, p, n);
+  fileclose(f);
+  return ret;
 }
 
 uint64
@@ -96,10 +120,19 @@ sys_close(void)
 {
   int fd;
   struct file *f;
+  struct proc *p = myproc();
 
   if(argfd(0, &fd, &f) < 0)
     return -1;
-  myproc()->ofile[fd] = 0;
+  acquire(&p->group->lock);
+  if(p->group->ofile[fd] != f){
+    release(&p->group->lock);
+    fileclose(f); // Drop the temporary reference from argfd().
+    return -1;
+  }
+  p->group->ofile[fd] = 0;
+  release(&p->group->lock);
+  fileclose(f); // Drop the table's reference.
   fileclose(f);
   return 0;
 }
@@ -110,9 +143,15 @@ sys_fstat(void)
   struct file *f;
   uint64 st; // user pointer to struct stat
 
-  if(argfd(0, 0, &f) < 0 || argaddr(1, &st) < 0)
+  if(argfd(0, 0, &f) < 0)
     return -1;
-  return filestat(f, st);
+  if(argaddr(1, &st) < 0){
+    fileclose(f);
+    return -1;
+  }
+  int ret = filestat(f, st);
+  fileclose(f);
+  return ret;
 }
 
 // Create the path new as a link to the same inode as old.
@@ -392,6 +431,7 @@ sys_chdir(void)
 {
   char path[MAXPATH];
   struct inode *ip;
+  struct inode *oldcwd;
   struct proc *p = myproc();
   
   begin_op();
@@ -406,9 +446,12 @@ sys_chdir(void)
     return -1;
   }
   iunlock(ip);
-  iput(p->cwd);
+  acquire(&p->group->lock);
+  oldcwd = p->group->cwd;
+  p->group->cwd = ip;
+  release(&p->group->lock);
+  iput(oldcwd);
   end_op();
-  p->cwd = ip;
   return 0;
 }
 
@@ -468,16 +511,27 @@ sys_pipe(void)
     return -1;
   fd0 = -1;
   if((fd0 = fdalloc(rf)) < 0 || (fd1 = fdalloc(wf)) < 0){
-    if(fd0 >= 0)
-      p->ofile[fd0] = 0;
+    if(fd0 >= 0){
+      acquire(&p->group->lock);
+      p->group->ofile[fd0] = 0;
+      release(&p->group->lock);
+    }
     fileclose(rf);
     fileclose(wf);
     return -1;
   }
-  if(copyout(p->group->pagetable, fdarray, (char*)&fd0, sizeof(fd0)) < 0 ||
-     copyout(p->group->pagetable, fdarray+sizeof(fd0), (char *)&fd1, sizeof(fd1)) < 0){
-    p->ofile[fd0] = 0;
-    p->ofile[fd1] = 0;
+  int copyerr;
+  acquire(&p->group->lock);
+  copyerr = copyout(p->group->pagetable, fdarray, (char*)&fd0, sizeof(fd0));
+  if(copyerr == 0)
+    copyerr = copyout(p->group->pagetable, fdarray+sizeof(fd0),
+                      (char *)&fd1, sizeof(fd1));
+  release(&p->group->lock);
+  if(copyerr < 0){
+    acquire(&p->group->lock);
+    p->group->ofile[fd0] = 0;
+    p->group->ofile[fd1] = 0;
+    release(&p->group->lock);
     fileclose(rf);
     fileclose(wf);
     return -1;

@@ -16,11 +16,14 @@ int nextpid = 1;
 struct spinlock pid_lock;
 
 extern void forkret(void);
-static void freeproc(struct proc *p);
+static struct thread_group *freeproc(struct proc *p);
 
 static struct thread_group* group_alloc();
 static void group_hold(struct thread_group*);
-static void group_put(struct thread_group*);
+static struct thread_group* group_put(struct thread_group*);
+static void group_destroy(struct thread_group*);
+
+struct spinlock thread_lock;
 
 extern char trampoline[]; // trampoline.S
 
@@ -54,6 +57,7 @@ procinit(void)
   
   initlock(&pid_lock, "nextpid");
   initlock(&wait_lock, "wait_lock");
+  initlock(&thread_lock, "thread_lock");
   for(p = proc; p < &proc[NPROC]; p++) {
       initlock(&p->lock, "proc");
       p->kstack = KSTACK((int) (p - proc));
@@ -128,22 +132,28 @@ found:
 
   // Allocate a trapframe page.
   if((p->trapframe = (struct trapframe *)kalloc()) == 0){
-    freeproc(p);
+    struct thread_group *group = freeproc(p);
     release(&p->lock);
+    if(group)
+      group_destroy(group);
     return 0;
   }
 
   if(is_thread == 0){
     // A new process owns a new group and user page table.
     if((p->group = group_alloc()) == 0){
-      freeproc(p);
+      struct thread_group *group = freeproc(p);
       release(&p->lock);
+      if(group)
+        group_destroy(group);
       return 0;
     }
     p->group->pagetable = proc_pagetable(p);
     if(p->group->pagetable == 0){
-      freeproc(p);
+      struct thread_group *group = freeproc(p);
       release(&p->lock);
+      if(group)
+        group_destroy(group);
       return 0;
     }
   }
@@ -160,18 +170,23 @@ found:
 // free a proc structure and the data hanging from it,
 // including user pages.
 // p->lock must be held.
-static void
+static struct thread_group *
 freeproc(struct proc *p)
 {
-  if(p->group && p->group->pagetable)
+  struct thread_group *group = 0;
+
+  if(p->group && p->group->pagetable){
+    acquire(&p->group->lock);
     uvmunmap(p->group->pagetable, p->trapframe_va, 1, 0);
+    release(&p->group->lock);
+  }
   if(p->trapframe)
     kfree((void*)p->trapframe);
   p->trapframe = 0;
   if(p->group){
-    struct thread_group *group = p->group;
+    group = p->group;
     p->group = 0;
-    group_put(group);
+    group = group_put(group);
   }
   p->pid = 0;
   p->parent = 0;
@@ -181,6 +196,8 @@ freeproc(struct proc *p)
   p->xstate = 0;
   p->state = UNUSED;
   p->is_thread = 0;
+  p->joiner = 0;
+  return group;
 }
 
 // Create a user page table for a given process,
@@ -248,15 +265,17 @@ userinit(void)
   
   // allocate one user page and copy init's instructions
   // and data into it.
+  acquire(&p->group->lock);
   uvminit(p->group->pagetable, initcode, sizeof(initcode));
   p->group->sz = PGSIZE;
+  release(&p->group->lock);
 
   // prepare for the very first "return" from kernel to user.
   p->trapframe->epc = 0;      // user program counter
   p->trapframe->sp = PGSIZE;  // user stack pointer
 
   safestrcpy(p->name, "initcode", sizeof(p->name));
-  p->cwd = namei("/");
+  p->group->cwd = namei("/");
 
   p->state = RUNNABLE;
 
@@ -271,15 +290,18 @@ growproc(int n)
   uint sz;
   struct proc *p = myproc();
 
+  acquire(&p->group->lock);
   sz = p->group->sz;
   if(n > 0){
     if((sz = uvmalloc(p->group->pagetable, sz, sz + n)) == 0) {
+      release(&p->group->lock);
       return -1;
     }
   } else if(n < 0){
     sz = uvmdealloc(p->group->pagetable, sz, sz + n);
   }
   p->group->sz = sz;
+  release(&p->group->lock);
   return 0;
 }
 
@@ -298,12 +320,17 @@ fork(void)
   }
 
   // Copy user memory from parent to child.
+  acquire(&p->group->lock);
   if(uvmcopy(p->group->pagetable, np->group->pagetable, p->group->sz) < 0){
-    freeproc(np);
+    release(&p->group->lock);
+    struct thread_group *group = freeproc(np);
     release(&np->lock);
+    if(group)
+      group_destroy(group);
     return -1;
   }
   np->group->sz = p->group->sz;
+  release(&p->group->lock);
 
   // copy saved user registers.
   *(np->trapframe) = *(p->trapframe);
@@ -311,11 +338,15 @@ fork(void)
   // Cause fork to return 0 in the child.
   np->trapframe->a0 = 0;
 
-  // increment reference counts on open file descriptors.
+  // Copy the parent's shared file table and current directory into the
+  // child's new thread group.
+  acquire(&p->group->lock);
   for(i = 0; i < NOFILE; i++)
-    if(p->ofile[i])
-      np->ofile[i] = filedup(p->ofile[i]);
-  np->cwd = idup(p->cwd);
+    if(p->group->ofile[i])
+      np->group->ofile[i] = filedup(p->group->ofile[i]);
+  if(p->group->cwd)
+    np->group->cwd = idup(p->group->cwd);
+  release(&p->group->lock);
 
   safestrcpy(np->name, p->name, sizeof(p->name));
 
@@ -360,22 +391,19 @@ exit(int status)
   if(p == initproc)
     panic("init exiting");
 
-  // Close all open files.
-  for(int fd = 0; fd < NOFILE; fd++){
-    if(p->ofile[fd]){
-      struct file *f = p->ofile[fd];
-      fileclose(f);
-      p->ofile[fd] = 0;
-    }
-  }
-
-  begin_op();
-  iput(p->cwd);
-  end_op();
-  p->cwd = 0;
-
+  acquire(&thread_lock);
   acquire(&wait_lock);
 
+  struct proc *tp = 0;
+  for(tp = proc; tp < &proc[NPROC]; tp++){
+    if(tp->group == p->group){
+      acquire(&tp->lock);
+      tp->killed = 1;
+      if(tp->state == SLEEPING)
+        tp->state = RUNNABLE;
+      release(&tp->lock);
+    }
+  }
   // Give any children to init.
   reparent(p);
 
@@ -388,6 +416,7 @@ exit(int status)
   p->state = ZOMBIE;
 
   release(&wait_lock);
+  release(&thread_lock);
 
   // Jump into the scheduler, never to return.
   sched();
@@ -417,15 +446,23 @@ wait(uint64 addr)
         if(np->state == ZOMBIE){
           // Found one.
           pid = np->pid;
-          if(addr != 0 && copyout(p->group->pagetable, addr, (char *)&np->xstate,
-                                  sizeof(np->xstate)) < 0) {
+          int copyerr = 0;
+          if(addr != 0){
+            acquire(&p->group->lock);
+            copyerr = copyout(p->group->pagetable, addr,
+                              (char *)&np->xstate, sizeof(np->xstate));
+            release(&p->group->lock);
+          }
+          if(copyerr < 0) {
             release(&np->lock);
             release(&wait_lock);
             return -1;
           }
-          freeproc(np);
+          struct thread_group *group = freeproc(np);
           release(&np->lock);
           release(&wait_lock);
+          if(group)
+            group_destroy(group);
           return pid;
         }
         release(&np->lock);
@@ -620,7 +657,11 @@ either_copyout(int user_dst, uint64 dst, void *src, uint64 len)
 {
   struct proc *p = myproc();
   if(user_dst){
-    return copyout(p->group->pagetable, dst, src, len);
+    int ret;
+    acquire(&p->group->lock);
+    ret = copyout(p->group->pagetable, dst, src, len);
+    release(&p->group->lock);
+    return ret;
   } else {
     memmove((char *)dst, src, len);
     return 0;
@@ -635,7 +676,11 @@ either_copyin(void *dst, int user_src, uint64 src, uint64 len)
 {
   struct proc *p = myproc();
   if(user_src){
-    return copyin(p->group->pagetable, dst, src, len);
+    int ret;
+    acquire(&p->group->lock);
+    ret = copyin(p->group->pagetable, dst, src, len);
+    release(&p->group->lock);
+    return ret;
   } else {
     memmove(dst, (char*)src, len);
     return 0;
@@ -691,38 +736,110 @@ group_hold(struct thread_group *group)
   release(&group->lock);
 }
 
-static void
+static struct thread_group *
 group_put(struct thread_group *group)
 {
-  int flag = 0;
+  int last = 0;
   acquire(&group->lock);
   if(group->refcount < 1)
     panic("group");
   if(--group->refcount == 0)
-    flag = 1;
+    last = 1;
   release(&group->lock);
-  if(flag){
-    if(group->pagetable)
-      proc_freepagetable(group->pagetable, group->sz);
-    kfree(group);
-  }
+  return last ? group : 0;
 }
 
-int kthread_create(uint64 start, uint64 arg, uint64 stack_top)
+static void
+group_destroy(struct thread_group *group)
+{
+  for(int fd = 0; fd < NOFILE; fd++){
+    if(group->ofile[fd]){
+      fileclose(group->ofile[fd]);
+      group->ofile[fd] = 0;
+    }
+  }
+  if(group->cwd){
+    begin_op();
+    iput(group->cwd);
+    end_op();
+    group->cwd = 0;
+  }
+  if(group->pagetable)
+    proc_freepagetable(group->pagetable, group->sz);
+  kfree(group);
+}
+
+int
+kthread_create(uint64 start, uint64 arg, uint64 stack_top)
 {
   struct proc *p = myproc();
+  pte_t *pte;
+  uint64 bottom, va;
+  struct thread_group *group;
+
+  // The entry point must be a user-accessible executable address.
+  if(p->group == 0)
+    return -1;
+  acquire(&p->group->lock);
+  if(p->group->pagetable == 0 || start >= MAXVA || start >= p->group->sz){
+    release(&p->group->lock);
+    return -1;
+  }
+  pte = walk(p->group->pagetable, start, 0);
+  if(pte == 0 || (*pte & (PTE_V | PTE_U | PTE_X)) != (PTE_V | PTE_U | PTE_X))
+  {
+    release(&p->group->lock);
+    return -1;
+  }
+
+  // The supplied stack grows down from stack_top and must be aligned for
+  // the RISC-V ABI. Check every page touched by the one-page stack range.
+  if(stack_top == 0 || stack_top > MAXVA || stack_top < PGSIZE || (stack_top & 0xf) != 0 || stack_top > p->group->sz)
+  {
+    release(&p->group->lock);
+    return -1;
+  }
+  bottom = stack_top - PGSIZE;
+  for(va = PGROUNDDOWN(bottom); va < stack_top; va += PGSIZE){
+    pte = walk(p->group->pagetable, va, 0);
+    if(pte == 0 || (*pte & (PTE_V | PTE_U | PTE_W)) != (PTE_V | PTE_U | PTE_W))
+    {
+      release(&p->group->lock);
+      return -1;
+    }
+  }
+  group = p->group;
+  release(&p->group->lock);
+
   struct proc *np = allocproc(1);
   if(np == 0)
     return -1;
   group_hold(p->group);
   np->group = p->group;
   acquire(&np->group->lock);
+  if(np->group != group){
+     struct thread_group *group = np->group;
+    np->group = 0;
+    release(&group->lock);
+    struct thread_group *last = group_put(group);
+    if(last)
+      group_destroy(last);
+    struct thread_group *unused = freeproc(np);
+    if(unused)
+      group_destroy(unused);
+    release(&np->lock);
+    return -1;
+  }
   if(mappages(np->group->pagetable, np->trapframe_va, PGSIZE, (uint64)(np->trapframe), PTE_R | PTE_W) < 0){
     struct thread_group *group = np->group;
     np->group = 0;
     release(&group->lock);
-    group_put(group);
-    freeproc(np);
+    struct thread_group *last = group_put(group);
+    if(last)
+      group_destroy(last);
+    struct thread_group *unused = freeproc(np);
+    if(unused)
+      group_destroy(unused);
     release(&np->lock);
     return -1;
   }
@@ -735,17 +852,69 @@ int kthread_create(uint64 start, uint64 arg, uint64 stack_top)
   release(&np->lock);
   return np->pid;
 }
-void kthread_exit(int status)
+
+void
+kthread_exit(int status)
 {
   struct proc *p = myproc();
-  wakeup(p->chan);
+  acquire(&thread_lock);
+  wakeup(p);
   acquire(&p->lock);
   p->xstate = status;
   p->state = ZOMBIE;
-  release(&p->thread_lock);
+  release(&thread_lock);
   sched();
+  panic("kthread_exit");
 }
-int kthread_join(int tid, uint64 status_addr)
+
+int
+kthread_join(int tid, uint64 status_addr)
 {
-  return -1;
+  struct proc *p = myproc();
+  struct proc *np = 0;
+  acquire(&thread_lock);
+  for(np = proc; np < &proc[NPROC]; np++) {
+    acquire(&np->lock);
+    if(np->pid == tid)
+      break;
+    release(&np->lock);
+  }
+  if(np == &proc[NPROC]){
+    release(&thread_lock);
+    return -1;
+  }
+  if(np->is_thread == 0 || np->group == 0 || np->group != p->group || np == p){
+    release(&np->lock);
+    release(&thread_lock);
+    return -1;
+  }
+  if(np->joiner && np->joiner != p){
+    release(&np->lock);
+    release(&thread_lock);
+    return -1;
+  }
+  np->joiner = p;
+  while(np->state != ZOMBIE){
+    release(&np->lock);
+    sleep(np, &thread_lock);
+    acquire(&np->lock);
+  }
+  int xstate = np->xstate;
+  if(status_addr){
+    acquire(&p->group->lock);
+    if(copyout(p->group->pagetable, status_addr, (char*)&xstate, sizeof(xstate)) < 0){
+      np->joiner = 0;
+      release(&p->group->lock);
+      release(&np->lock);
+      release(&thread_lock);
+      return -1;
+    }
+    release(&p->group->lock);
+  }
+  struct thread_group *group = freeproc(np);
+  release(&np->lock);
+  release(&thread_lock);
+  if(group)
+    group_destroy(group);
+  return tid;
 }

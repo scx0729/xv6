@@ -53,8 +53,12 @@ usertrap(void)
   if(r_scause() == 8){
     // system call
 
-    if(p->killed)
-      exit(-1);
+    if(p->killed){
+      if(p->is_thread)
+        kthread_exit(-1);
+      else
+        exit(-1);
+    }
 
     // sepc points to the ecall instruction,
     // but we want to return to the next instruction.
@@ -73,8 +77,12 @@ usertrap(void)
     p->killed = 1;
   }
 
-  if(p->killed)
-    exit(-1);
+  if(p->killed){
+    if(p->is_thread)
+      kthread_exit(-1);
+    else
+      exit(-1);
+  }
 
   // give up the CPU if this is a timer interrupt.
   if(which_dev == 2)
@@ -119,7 +127,9 @@ usertrapret(void)
   w_sepc(p->trapframe->epc);
 
   // tell trampoline.S the user page table to switch to.
+  acquire(&p->group->lock);
   uint64 satp = MAKE_SATP(p->group->pagetable);
+  release(&p->group->lock);
 
   // jump to trampoline.S at the top of memory, which 
   // switches to the user page table, restores user registers,
@@ -217,4 +227,3 @@ devintr()
     return 0;
   }
 }
-

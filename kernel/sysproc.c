@@ -46,7 +46,10 @@ sys_sbrk(void)
 
   if(argint(0, &n) < 0)
     return -1;
-  addr = myproc()->group->sz;
+  struct proc *p = myproc();
+  acquire(&p->group->lock);
+  addr = p->group->sz;
+  release(&p->group->lock);
   if(growproc(n) < 0)
     return -1;
   return addr;
