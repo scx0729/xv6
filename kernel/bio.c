@@ -37,6 +37,8 @@ struct {
   // head.next is most recent, head.prev is least.
 } bcache;
 
+#define REF_EVICTING ((uint)-1)
+
 static int
 bhash(uint dev, uint blockno)
 {
@@ -67,6 +69,13 @@ binit(void)
 
 }
 
+int CAS(uint *x, uint old, uint new)
+{
+  if(__sync_bool_compare_and_swap(x, old, new))
+    return 1;
+  return 0;
+}
+
 // Look through buffer cache for block on device dev.
 // If not found, allocate a buffer.
 // In either case, return locked buffer.
@@ -76,24 +85,41 @@ bget(uint dev, uint blockno)
   struct buf *b;
 
   int index = bhash(dev, blockno);
-  acquire(&bcache.bucket[index].lock);
 
   // Is the block already cached?
-  for(b = bcache.bucket[index].head.next; b != &bcache.bucket[index].head; b = b->next){
+  for(int i = 0;i < NBUF;i++){
+    b = &bcache.buf[i];
     if(b->dev == dev && b->blockno == blockno){
-      b->refcnt++;
-      release(&bcache.bucket[index].lock);
+      uint dev = b->dev, blockno = b->blockno;
+      uint refcnt = 0;
+
+      int pinned = 0;
+      for(;;){
+        refcnt = __sync_fetch_and_add(&b->refcnt, 0);
+        if(refcnt == REF_EVICTING)
+          break;
+        if(CAS(&b->refcnt, refcnt, refcnt + 1)){
+          pinned = 1;
+          break;
+        }
+      }
+      if(!pinned)
+        continue;
+
+      if(b->dev != dev || b->blockno != blockno){
+        __sync_fetch_and_sub(&b->refcnt, 1);
+        continue;
+      }
       acquiresleep(&b->lock);
       return b;
     }
   }
-  release(&bcache.bucket[index].lock);
-  acquire(&bcache.evict_lock);
 
+  acquire(&bcache.evict_lock);
   acquire(&bcache.bucket[index].lock);
   for(b = bcache.bucket[index].head.next; b != &bcache.bucket[index].head; b = b->next){
     if(b->dev == dev && b->blockno == blockno){
-      b->refcnt++;
+      __sync_fetch_and_add(&b->refcnt, 1);
       release(&bcache.bucket[index].lock);
       release(&bcache.evict_lock);
       acquiresleep(&b->lock);
@@ -106,14 +132,17 @@ bget(uint dev, uint blockno)
   for(int i = 0; i < NBUCKET;i++){
     acquire(&bcache.bucket[i].lock);
     for(b = bcache.bucket[i].head.prev; b != &bcache.bucket[i].head; b = b->prev){
-      if(b->refcnt == 0){
+      if(__sync_fetch_and_add(&b->refcnt, 0) == 0){
         if(i != index)
           acquire(&bcache.bucket[index].lock);
+        if(!CAS(&b->refcnt, 0, REF_EVICTING)){
+          if(i != index)
+            release(&bcache.bucket[index].lock);
+          continue;
+        }
         b->dev = dev;
         b->blockno = blockno;
         b->valid = 0;
-        b->refcnt = 1;
-        // 从旧bucket删除
         struct buf *f = b->prev;
         f->next = b->next;
         b->next->prev = f;
@@ -122,6 +151,8 @@ bget(uint dev, uint blockno)
         b->prev = &bcache.bucket[index].head;
         bcache.bucket[index].head.next->prev = b;
         bcache.bucket[index].head.next = b;
+        if(!CAS(&b->refcnt, REF_EVICTING, 1))
+          panic("bget");
         if(i != index)
           release(&bcache.bucket[index].lock);
         release(&bcache.bucket[i].lock);
@@ -180,9 +211,10 @@ brelse(struct buf *b)
 
   int index = bhash(b->dev, b->blockno);
   releasesleep(&b->lock);
+
+  uint refcnt = __sync_fetch_and_sub(&b->refcnt, 1);
   acquire(&bcache.bucket[index].lock);
-  b->refcnt--;
-  if (b->refcnt == 0) {
+  if (refcnt == 1) {
     // no one is waiting for it.
     b->next->prev = b->prev;
     b->prev->next = b->next;
@@ -191,24 +223,22 @@ brelse(struct buf *b)
     bcache.bucket[index].head.next->prev = b;
     bcache.bucket[index].head.next = b;
   }
-  
+
   release(&bcache.bucket[index].lock);
 }
 
 void
 bpin(struct buf *b) {
-  int index = bhash(b->dev, b->blockno);
-  acquire(&bcache.bucket[index].lock);
-  b->refcnt++;
-  release(&bcache.bucket[index].lock);
+  uint refcnt = __sync_fetch_and_add(&b->refcnt, 0);
+  while(!CAS(&b->refcnt, refcnt, refcnt + 1))
+    refcnt = __sync_fetch_and_add(&b->refcnt, 0);
 }
 
 void
 bunpin(struct buf *b) {
-  int index = bhash(b->dev, b->blockno);
-  acquire(&bcache.bucket[index].lock);
-  b->refcnt--;
-  release(&bcache.bucket[index].lock);
+  uint refcnt = __sync_fetch_and_add(&b->refcnt, 0);
+  while(!CAS(&b->refcnt, refcnt, refcnt - 1))
+    refcnt = __sync_fetch_and_add(&b->refcnt, 0);
 }
 
 
