@@ -79,7 +79,7 @@ usertrap(void)
       }
     }
     if(v == 0)
-      exit(-1);
+      exit(-1);    
     if((r_scause() == 13 && !(v->prot & PROT_READ)) || (r_scause() == 15 && !(v->prot & PROT_WRITE)))
       exit(-1);
     uint64 page_va = PGROUNDDOWN(fault_addr);
@@ -88,17 +88,37 @@ usertrap(void)
     uint64 n = PGSIZE;
     if(n > v->length - delta)
       n = v->length - delta;
-    void *mem = kalloc();
-    if(mem == 0)
-      exit(-1);
-    memset(mem, 0, PGSIZE);
-    ilock(v->file->ip);
-    if(readi(v->file->ip, 0, (uint64)mem, file_offset, n) < 0){
-      iunlock(v->file->ip);
-      kfree(mem);
-      exit(-1);
+
+    uint64 chosen_pa = 0;
+    if(v->flags == MAP_SHARED){
+      chosen_pa = mmapcache_get(v->file->ip, file_offset);
     }
-    iunlock(v->file->ip);
+
+    if(chosen_pa == 0){
+      void *mem = kalloc();
+      if(mem == 0)
+        exit(-1);
+      memset(mem, 0, PGSIZE);
+      chosen_pa = (uint64)mem;
+      ilock(v->file->ip);
+      if(readi(v->file->ip, 0, (uint64)mem, file_offset, n) < 0){
+        iunlock(v->file->ip);
+        kfree(mem);
+        exit(-1);
+      }
+      iunlock(v->file->ip);
+      if(v->flags == MAP_SHARED){
+        uint64 ret_pa = mmapcache_insert(v->file->ip, file_offset, chosen_pa);
+        if(ret_pa == 0){
+          kfree((void*)chosen_pa);
+          exit(-1);
+        } else if (ret_pa != 0 && ret_pa != chosen_pa){
+          kfree((void*)chosen_pa);
+          chosen_pa = ret_pa;
+        }
+      } else if (v->flags == MAP_PRIVATE)
+        chosen_pa = (uint64)mem;
+    }
     int flags = PTE_U;
     if(v->prot == PROT_READ)
       flags |= PTE_R;
@@ -106,8 +126,11 @@ usertrap(void)
       flags |= PTE_R | PTE_W;
     if(v->prot == (PROT_READ | PROT_WRITE))
       flags |= PTE_R | PTE_W;
-    if(mappages(p->pagetable, page_va, PGSIZE, (uint64)mem, flags) < 0){
-      kfree(mem);
+    if(mappages(p->pagetable, page_va, PGSIZE, chosen_pa, flags) < 0){
+      if(v->flags == MAP_SHARED)
+        mmapcache_put(chosen_pa);
+      else
+        kfree((void*)chosen_pa);
       exit(-1);
     }
   } else if((which_dev = devintr()) != 0){

@@ -360,8 +360,8 @@ exit(int status)
         pte_t *pte = walk(p->pagetable, va, 0);
         if(pte == 0 || !(*pte & PTE_V))
           continue;
+        uint64 pa = PTE2PA(*pte);
         if(p->vmas[i].flags == MAP_SHARED && (p->vmas[i].prot & PROT_WRITE)){
-          uint64 pa = PTE2PA(*pte);
           uint64 delta = va - p->vmas[i].addr;
           uint64 file_offset = p->vmas[i].offset + delta;
           int n = PGSIZE;
@@ -373,7 +373,11 @@ exit(int status)
           iunlock(p->vmas[i].file->ip);
           end_op();
         }
-        uvmunmap(p->pagetable, va, 1, 1);
+        if(p->vmas[i].flags == MAP_SHARED){
+          uvmunmap(p->pagetable, va, 1, 0);
+          mmapcache_put(pa);
+        } else 
+          uvmunmap(p->pagetable, va, 1, 1);
       }
       struct file *f = p->vmas[i].file;
       memset(&p->vmas[i], 0, sizeof(p->vmas[i]));

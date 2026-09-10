@@ -561,8 +561,8 @@ sys_munmap(void)
     pte_t *pte = walk(p->pagetable, va, 0);
     if(pte == 0 || !(*pte & PTE_V))
       continue;
+    uint64 pa = PTE2PA(*pte);
     if(v->flags == MAP_SHARED && (v->prot & PROT_WRITE)){
-      uint64 pa = PTE2PA(*pte);
       uint64 delta = va - v->addr;
       uint64 file_offset = v->offset + delta;
       int n = PGSIZE;
@@ -578,7 +578,11 @@ sys_munmap(void)
       iunlock(v->file->ip);
       end_op();
     }
-    uvmunmap(p->pagetable, va, 1, 1);
+    if(v->flags == MAP_SHARED){
+      uvmunmap(p->pagetable, va, 1, 0);
+      mmapcache_put(pa);
+    } else 
+      uvmunmap(p->pagetable, va, 1, 1);
   }
   if(addr == v->addr && end == v->addr + v->length){
     struct file *f = v->file;
