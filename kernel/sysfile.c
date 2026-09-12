@@ -509,8 +509,8 @@ sys_mmap(void)
   if(map_length < length)
     return -1;
   uint64 top = TRAPFRAME;
-  for(int i = 0;i < 16;i++){
-    if(p->vmas[i].file != 0 && p->vmas[i].addr < top)
+  for(int i = 0;i < MAX_VAM;i++){
+    if(p->vmas[i].type == VMA_FILE && p->vmas[i].addr < top)
       top = p->vmas[i].addr;
   }
   if(top < map_length)
@@ -519,8 +519,8 @@ sys_mmap(void)
   if(map_addr < PGROUNDUP(p->sz))
     return -1;
   struct vma *v = 0;
-  for(int i = 0;i < 16;i++){
-    if(p->vmas[i].file == 0){
+  for(int i = 0;i < MAX_VAM;i++){
+    if(p->vmas[i].type == VMA_UNUSED){
       v = &p->vmas[i];
       break;
     }
@@ -533,6 +533,7 @@ sys_mmap(void)
   v->flags = flags;
   v->file = filedup(f);
   v->offset = offset;
+  v->type = VMA_FILE;
   return map_addr;
 }
 
@@ -547,8 +548,8 @@ sys_munmap(void)
   uint64 end = addr + length;
   struct proc *p = myproc();
   struct vma *v = 0;
-  for(int i = 0;i < 16;i++){
-    if(p->vmas[i].file != 0 && p->vmas[i].addr <= addr && p->vmas[i].addr + p->vmas[i].length >= end){
+  for(int i = 0;i < MAX_VAM;i++){
+    if(p->vmas[i].type == VMA_FILE && p->vmas[i].addr <= addr && p->vmas[i].addr + p->vmas[i].length >= end){
       v = &p->vmas[i];
       break;
     }

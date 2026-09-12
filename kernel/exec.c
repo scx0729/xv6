@@ -6,6 +6,10 @@
 #include "proc.h"
 #include "defs.h"
 #include "elf.h"
+#include "fcntl.h"
+#include "fs.h"
+#include "sleeplock.h"
+#include "file.h"
 
 static int loadseg(pde_t *pgdir, uint64 addr, struct inode *ip, uint offset, uint sz);
 
@@ -110,6 +114,40 @@ exec(char *path, char **argv)
     
   // Commit to the user image.
   oldpagetable = p->pagetable;
+  for(int i = 0;i < MAX_VAM;i++){
+    struct vma *v = &p->vmas[i];
+    if(v->type == VMA_FILE){
+      for(uint64 va = v->addr; va < v->addr + v->length; va += PGSIZE){
+        pte_t *pte = walk(oldpagetable, va, 0);
+        if(pte == 0 || (*pte & PTE_V) == 0)
+          continue;
+        uint64 pa = PTE2PA(*pte);
+
+        // exec 相当于解除所有旧映射，共享修改需要写回
+        if(v->flags == MAP_SHARED && (v->prot & PROT_WRITE)){
+          uint64 delta = va - v->addr;
+          uint64 file_offset = v->offset + delta;
+          uint64 n = PGSIZE;
+          if(n > v->length - delta)
+            n = v->length - delta;
+          begin_op();
+          ilock(v->file->ip);
+          writei(v->file->ip, 0, pa, file_offset, n);
+          iunlock(v->file->ip);
+          end_op();
+        }
+        if(v->flags == MAP_SHARED){
+          uvmunmap(oldpagetable, va, 1, 0);
+          mmapcache_put(pa);
+        } else {
+          uvmunmap(oldpagetable, va, 1, 1);
+        }
+      }
+      fileclose(v->file);
+    }
+  }
+  memset(p->vmas, 0, sizeof(p->vmas));
+
   p->pagetable = pagetable;
   p->sz = sz;
   p->trapframe->epc = elf.entry;  // initial program counter = main

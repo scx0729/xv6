@@ -81,6 +81,7 @@ struct trapframe {
 };
 
 enum procstate { UNUSED, USED, SLEEPING, RUNNABLE, RUNNING, ZOMBIE };
+enum vma_type { VMA_UNUSED, VMA_FILE, VMA_ANON };
 
 struct vma{
   uint64 addr;      // 区域起始虚拟地址
@@ -89,6 +90,7 @@ struct vma{
   int flags;        // MAP_SHARED 或 MAP_PRIVATE
   struct file *file;// 映射的文件
   uint64 offset;    // 对应的文件偏移
+  enum vma_type type;
 };
 
 // Per-process state
@@ -114,5 +116,5 @@ struct proc {
   struct file *ofile[NOFILE];  // Open files
   struct inode *cwd;           // Current directory
   char name[16];               // Process name (debugging)
-  struct vma vmas[16];
+  struct vma vmas[MAX_VAM];
 };

@@ -167,6 +167,7 @@ freeproc(struct proc *p)
   p->chan = 0;
   p->killed = 0;
   p->xstate = 0;
+  memset(p->vmas, 0, sizeof(p->vmas));
   p->state = UNUSED;
 }
 
@@ -256,18 +257,64 @@ userinit(void)
 int
 growproc(int n)
 {
-  uint sz;
+  uint64 sz;
   struct proc *p = myproc();
 
   sz = p->sz;
+  uint64 newsz = sz + n;
   if(n > 0){
-    if((sz = uvmalloc(p->pagetable, sz, sz + n)) == 0) {
-      return -1;
+    struct vma *anon = 0, *unused = 0;
+    uint64 mmap_top = TRAPFRAME;
+    for(int i = 0;i < MAX_VAM;i++){
+      if(!anon && p->vmas[i].type == VMA_ANON)
+        anon = &p->vmas[i];
+      else if (!unused && p->vmas[i].type == VMA_UNUSED)
+        unused = &p->vmas[i];
+      else if (p->vmas[i].type == VMA_FILE)
+        if(mmap_top > p->vmas[i].addr)
+          mmap_top = p->vmas[i].addr;
     }
-  } else if(n < 0){
-    sz = uvmdealloc(p->pagetable, sz, sz + n);
+    if(newsz < sz)
+      return -1;
+    if(newsz > mmap_top)
+      return -1;
+    if(!anon && !unused)
+      return -1;
+    if(anon){
+      if(anon->addr + anon->length != sz)
+        return -1;
+      anon->length += n;
+    }
+    else if (unused){
+      unused->addr = sz;
+      unused->length = n;
+      unused->prot = PROT_READ | PROT_WRITE;
+      unused->flags = MAP_PRIVATE;
+      unused->file = 0;
+      unused->offset = 0;
+      unused->type = VMA_ANON;
+    }
+  } else if (n < 0){
+    uint64 decrease = (uint64)(-(long)n);
+    if(decrease > sz)
+      return -1;
+    uvmdealloc(p->pagetable, sz, newsz);
+    struct vma *anon = 0;
+    for(int i = 0;i < MAX_VAM;i++){
+      if(p->vmas[i].type == VMA_ANON){
+        anon = &p->vmas[i];
+        break;
+      }
+    }
+    if(anon){
+      if(newsz > anon->addr)
+        anon->length = newsz - anon->addr;
+      else{
+        memset(anon, 0, sizeof(*anon));
+      }
+    }
   }
-  p->sz = sz;
+  p->sz = newsz;
   return 0;
 }
 
@@ -299,10 +346,12 @@ fork(void)
   // Cause fork to return 0 in the child.
   np->trapframe->a0 = 0;
 
-  for(int i = 0;i < 16;i++){
-    np->vmas[i] = p->vmas[i];
-    if(np->vmas[i].file != 0)
-      filedup(np->vmas[i].file);
+  for(int i = 0;i < MAX_VAM;i++){
+    if(p->vmas[i].type != VMA_UNUSED){
+      np->vmas[i] = p->vmas[i];
+      if(np->vmas[i].type == VMA_FILE)
+        filedup(np->vmas[i].file);
+    }
   }
 
   // increment reference counts on open file descriptors.
@@ -354,8 +403,8 @@ exit(int status)
   if(p == initproc)
     panic("init exiting");
 
-  for(int i = 0;i < 16;i++){
-    if(p->vmas[i].file != 0){
+  for(int i = 0;i < MAX_VAM;i++){
+    if(p->vmas[i].type == VMA_FILE){
       for(uint64 va = p->vmas[i].addr;va < p->vmas[i].addr + p->vmas[i].length;va += PGSIZE){
         pte_t *pte = walk(p->pagetable, va, 0);
         if(pte == 0 || !(*pte & PTE_V))

@@ -20,6 +20,84 @@ void kernelvec();
 
 extern int devintr();
 
+int
+vmafault(struct proc *p, uint64 fault_addr, int write)
+{
+  struct vma *v = 0;
+  for(int i = 0; i < MAX_VAM; i++){
+    if(p->vmas[i].addr <= fault_addr && fault_addr < p->vmas[i].addr + p->vmas[i].length && p->vmas[i].type != VMA_UNUSED){
+      v = &p->vmas[i];
+      break;
+    }
+  }
+  if(v == 0)
+    return -1;
+  if((!write && !(v->prot & PROT_READ)) || (write && !(v->prot & PROT_WRITE)))
+    return -1;
+
+  uint64 chosen_pa = 0;
+  uint64 page_va = PGROUNDDOWN(fault_addr);
+  if(v->type == VMA_FILE){
+    uint64 delta = page_va - v->addr;
+    uint64 file_offset = v->offset + delta;
+    uint64 n = PGSIZE;
+    if(n > v->length - delta)
+      n = v->length - delta;
+
+    if(v->flags == MAP_SHARED){
+      chosen_pa = mmapcache_get(v->file->ip, file_offset);
+    }
+
+    if(chosen_pa == 0){
+      void *mem = kalloc();
+      if(mem == 0)
+        return -1;
+      memset(mem, 0, PGSIZE);
+      chosen_pa = (uint64)mem;
+      ilock(v->file->ip);
+      if(readi(v->file->ip, 0, (uint64)mem, file_offset, n) < 0){
+        iunlock(v->file->ip);
+        kfree(mem);
+        return -1;
+      }
+      iunlock(v->file->ip);
+      if(v->flags == MAP_SHARED){
+        uint64 ret_pa = mmapcache_insert(v->file->ip, file_offset, chosen_pa);
+        if(ret_pa == 0){
+          kfree((void*)chosen_pa);
+          return -1;
+        } else if (ret_pa != 0 && ret_pa != chosen_pa){
+          kfree((void*)chosen_pa);
+          chosen_pa = ret_pa;
+        }
+      } else if (v->flags == MAP_PRIVATE)
+        chosen_pa = (uint64)mem;
+    }
+  } else if (v->type == VMA_ANON){
+    void *mem = kalloc();
+    if(mem == 0)
+      return -1;
+    memset(mem, 0, PGSIZE);
+    chosen_pa = (uint64)mem;
+  }
+
+  int flags = PTE_U;
+  if(v->prot == PROT_READ)
+    flags |= PTE_R;
+  if(v->prot == PROT_WRITE)
+    flags |= PTE_R | PTE_W;
+  if(v->prot == (PROT_READ | PROT_WRITE))
+    flags |= PTE_R | PTE_W;
+  if(mappages(p->pagetable, page_va, PGSIZE, chosen_pa, flags) < 0){
+    if(v->type == VMA_FILE && v->flags == MAP_SHARED)
+      mmapcache_put(chosen_pa);
+    else
+      kfree((void*)chosen_pa);
+    return -1;
+  }
+  return 0;
+}
+
 void
 trapinit(void)
 {
@@ -70,69 +148,8 @@ usertrap(void)
 
     syscall();
   } else if(r_scause() == 13 || r_scause() == 15){
-    uint64 fault_addr = r_stval();
-    struct vma *v = 0;
-    for(int i = 0;i < 16;i++){
-      if(p->vmas[i].addr <= fault_addr && fault_addr < p->vmas[i].addr + p->vmas[i].length && p->vmas[i].file != 0){
-        v = &p->vmas[i];
-        break;
-      }
-    }
-    if(v == 0)
-      exit(-1);    
-    if((r_scause() == 13 && !(v->prot & PROT_READ)) || (r_scause() == 15 && !(v->prot & PROT_WRITE)))
+    if(vmafault(p, r_stval(), r_scause() == 15) < 0)
       exit(-1);
-    uint64 page_va = PGROUNDDOWN(fault_addr);
-    uint64 delta = page_va - v->addr;
-    uint64 file_offset = v->offset + delta;
-    uint64 n = PGSIZE;
-    if(n > v->length - delta)
-      n = v->length - delta;
-
-    uint64 chosen_pa = 0;
-    if(v->flags == MAP_SHARED){
-      chosen_pa = mmapcache_get(v->file->ip, file_offset);
-    }
-
-    if(chosen_pa == 0){
-      void *mem = kalloc();
-      if(mem == 0)
-        exit(-1);
-      memset(mem, 0, PGSIZE);
-      chosen_pa = (uint64)mem;
-      ilock(v->file->ip);
-      if(readi(v->file->ip, 0, (uint64)mem, file_offset, n) < 0){
-        iunlock(v->file->ip);
-        kfree(mem);
-        exit(-1);
-      }
-      iunlock(v->file->ip);
-      if(v->flags == MAP_SHARED){
-        uint64 ret_pa = mmapcache_insert(v->file->ip, file_offset, chosen_pa);
-        if(ret_pa == 0){
-          kfree((void*)chosen_pa);
-          exit(-1);
-        } else if (ret_pa != 0 && ret_pa != chosen_pa){
-          kfree((void*)chosen_pa);
-          chosen_pa = ret_pa;
-        }
-      } else if (v->flags == MAP_PRIVATE)
-        chosen_pa = (uint64)mem;
-    }
-    int flags = PTE_U;
-    if(v->prot == PROT_READ)
-      flags |= PTE_R;
-    if(v->prot == PROT_WRITE)
-      flags |= PTE_R | PTE_W;
-    if(v->prot == (PROT_READ | PROT_WRITE))
-      flags |= PTE_R | PTE_W;
-    if(mappages(p->pagetable, page_va, PGSIZE, chosen_pa, flags) < 0){
-      if(v->flags == MAP_SHARED)
-        mmapcache_put(chosen_pa);
-      else
-        kfree((void*)chosen_pa);
-      exit(-1);
-    }
   } else if((which_dev = devintr()) != 0){
     // ok
   } else {
@@ -285,4 +302,3 @@ devintr()
     return 0;
   }
 }
-

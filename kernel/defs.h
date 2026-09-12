@@ -145,6 +145,7 @@ void            trapinit(void);
 void            trapinithart(void);
 extern struct spinlock tickslock;
 void            usertrapret(void);
+int             vmafault(struct proc *, uint64, int);
 
 // uart.c
 void            uartinit(void);
