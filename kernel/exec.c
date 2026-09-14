@@ -11,19 +11,34 @@
 #include "sleeplock.h"
 #include "file.h"
 
-static int loadseg(pde_t *pgdir, uint64 addr, struct inode *ip, uint offset, uint sz);
+
+static int
+elf_flags_to_prot(uint flags)
+{
+  int port = PROT_NONE;
+
+  if(flags & ELF_PROG_FLAG_READ)
+    port |= PROT_READ;
+  if(flags & ELF_PROG_FLAG_WRITE)
+    port |= PROT_WRITE;
+  if(flags & ELF_PROG_FLAG_EXEC)
+    port |= PROT_EXEC;
+  return port;
+}
 
 int
 exec(char *path, char **argv)
 {
   char *s, *last;
-  int i, off;
+  int i, off, vma_count = 0;
   uint64 argc, sz = 0, sp, ustack[MAXARG], stackbase;
   struct elfhdr elf;
   struct inode *ip;
   struct proghdr ph;
   pagetable_t pagetable = 0, oldpagetable;
   struct proc *p = myproc();
+  struct vma new_vmas[MAX_VAM];
+  memset(new_vmas, 0, sizeof(new_vmas));
 
   begin_op();
 
@@ -52,14 +67,25 @@ exec(char *path, char **argv)
       goto bad;
     if(ph.vaddr + ph.memsz < ph.vaddr)
       goto bad;
-    uint64 sz1;
-    if((sz1 = uvmalloc(pagetable, sz, ph.vaddr + ph.memsz)) == 0)
+    if(vma_count >= MAX_VAM)
       goto bad;
-    sz = sz1;
-    if((ph.vaddr % PGSIZE) != 0)
+
+    struct vma *v = &new_vmas[vma_count++];
+    v->addr = ph.vaddr;
+    v->length = ph.memsz;
+    v->offset = ph.off;
+    v->file_length = ph.filesz;
+    v->flags = MAP_PRIVATE;
+    v->file = 0;
+    v->ip = idup(ip);
+    v->type = VMA_ELF;
+    v->prot = elf_flags_to_prot(ph.flags);
+
+    if(ph.vaddr % PGSIZE != 0)
       goto bad;
-    if(loadseg(pagetable, ph.vaddr, ip, ph.off, ph.filesz) < 0)
-      goto bad;
+    uint64 end = ph.vaddr + ph.memsz;
+    if(end > sz)
+      sz = end;
   }
   iunlockput(ip);
   end_op();
@@ -146,7 +172,13 @@ exec(char *path, char **argv)
       fileclose(v->file);
     }
   }
-  memset(p->vmas, 0, sizeof(p->vmas));
+  for(int i = 0;i < MAX_VAM;i++)
+    if(p->vmas[i].type == VMA_ELF){
+      begin_op();
+      iput(p->vmas[i].ip);
+      end_op();
+    }
+  memmove(p->vmas, new_vmas, sizeof(new_vmas));
 
   p->pagetable = pagetable;
   p->sz = sz;
@@ -163,30 +195,10 @@ exec(char *path, char **argv)
     iunlockput(ip);
     end_op();
   }
+  begin_op();
+  for(int i = 0;i < MAX_VAM;i++)
+    if(new_vmas[i].ip)
+      iput(new_vmas[i].ip);
+  end_op();
   return -1;
-}
-
-// Load a program segment into pagetable at virtual address va.
-// va must be page-aligned
-// and the pages from va to va+sz must already be mapped.
-// Returns 0 on success, -1 on failure.
-static int
-loadseg(pagetable_t pagetable, uint64 va, struct inode *ip, uint offset, uint sz)
-{
-  uint i, n;
-  uint64 pa;
-
-  for(i = 0; i < sz; i += PGSIZE){
-    pa = walkaddr(pagetable, va + i);
-    if(pa == 0)
-      panic("loadseg: address should exist");
-    if(sz - i < PGSIZE)
-      n = sz - i;
-    else
-      n = PGSIZE;
-    if(readi(ip, 0, (uint64)pa, offset+i, n) != n)
-      return -1;
-  }
-  
-  return 0;
 }

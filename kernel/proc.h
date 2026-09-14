@@ -81,14 +81,16 @@ struct trapframe {
 };
 
 enum procstate { UNUSED, USED, SLEEPING, RUNNABLE, RUNNING, ZOMBIE };
-enum vma_type { VMA_UNUSED, VMA_FILE, VMA_ANON };
+enum vma_type { VMA_UNUSED, VMA_FILE, VMA_ANON, VMA_ELF };
 
 struct vma{
   uint64 addr;      // 区域起始虚拟地址
   uint64 length;    // 区域长度
+  uint64 file_length;
   int prot;         // 可读、可写等权限
   int flags;        // MAP_SHARED 或 MAP_PRIVATE
   struct file *file;// 映射的文件
+  struct inode *ip;
   uint64 offset;    // 对应的文件偏移
   enum vma_type type;
 };

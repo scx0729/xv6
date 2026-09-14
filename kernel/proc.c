@@ -351,6 +351,8 @@ fork(void)
       np->vmas[i] = p->vmas[i];
       if(np->vmas[i].type == VMA_FILE)
         filedup(np->vmas[i].file);
+      if(np->vmas[i].type == VMA_ELF)
+        idup(np->vmas[i].ip);
     }
   }
 
@@ -431,8 +433,12 @@ exit(int status)
       struct file *f = p->vmas[i].file;
       memset(&p->vmas[i], 0, sizeof(p->vmas[i]));
       fileclose(f);
+    } else if(p->vmas[i].type == VMA_ELF){
+      begin_op();
+      iput(p->vmas[i].ip);
+      end_op();
+      memset(&p->vmas[i], 0, sizeof(p->vmas[i]));
     }
-    
   }  
 
   // Close all open files.

@@ -21,7 +21,7 @@ void kernelvec();
 extern int devintr();
 
 int
-vmafault(struct proc *p, uint64 fault_addr, int write)
+vmafault(struct proc *p, uint64 fault_addr, int access)
 {
   struct vma *v = 0;
   for(int i = 0; i < MAX_VAM; i++){
@@ -32,7 +32,9 @@ vmafault(struct proc *p, uint64 fault_addr, int write)
   }
   if(v == 0)
     return -1;
-  if((!write && !(v->prot & PROT_READ)) || (write && !(v->prot & PROT_WRITE)))
+  if((v->prot & access) == 0)
+    return -1;
+  if((v->type == VMA_ELF || v->type == VMA_ANON) && fault_addr >= p->sz)
     return -1;
 
   uint64 chosen_pa = 0;
@@ -79,15 +81,35 @@ vmafault(struct proc *p, uint64 fault_addr, int write)
       return -1;
     memset(mem, 0, PGSIZE);
     chosen_pa = (uint64)mem;
+  } else if (v->type == VMA_ELF){
+    void *mem = kalloc();
+    if(mem == 0)
+      return -1;
+    memset(mem, 0, PGSIZE);
+    uint64 delta = page_va - v->addr;
+    uint64 file_offset = v->offset + delta;
+    uint64 n = PGSIZE;
+    if(v->file_length > delta){
+      if(n > v->file_length - delta)
+        n = v->file_length - delta;
+      ilock(v->ip);
+      if(readi(v->ip, 0, (uint64)mem, file_offset, n) != n){
+        iunlock(v->ip);
+        kfree(mem);
+        return -1;
+      }
+      iunlock(v->ip);
+    }
+    chosen_pa = (uint64)mem;
   }
 
   int flags = PTE_U;
-  if(v->prot == PROT_READ)
+  if(v->prot & PROT_READ)
     flags |= PTE_R;
-  if(v->prot == PROT_WRITE)
+  if(v->prot & PROT_WRITE)
     flags |= PTE_R | PTE_W;
-  if(v->prot == (PROT_READ | PROT_WRITE))
-    flags |= PTE_R | PTE_W;
+  if(v->prot & PROT_EXEC)
+    flags |= PTE_X;
   if(mappages(p->pagetable, page_va, PGSIZE, chosen_pa, flags) < 0){
     if(v->type == VMA_FILE && v->flags == MAP_SHARED)
       mmapcache_put(chosen_pa);
@@ -147,8 +169,15 @@ usertrap(void)
     intr_on();
 
     syscall();
-  } else if(r_scause() == 13 || r_scause() == 15){
-    if(vmafault(p, r_stval(), r_scause() == 15) < 0)
+  } else if(r_scause() == 12 || r_scause() == 13 || r_scause() == 15){
+    int access;
+    if(r_scause() == 12)
+      access = PROT_EXEC;
+    else if(r_scause() == 13)
+      access = PROT_READ;
+    else
+      access = PROT_WRITE;
+    if(vmafault(p, r_stval(), access) < 0)
       exit(-1);
   } else if((which_dev = devintr()) != 0){
     // ok

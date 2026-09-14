@@ -7,6 +7,7 @@
 #include "fs.h"
 #include "spinlock.h"
 #include "proc.h"
+#include "fcntl.h"
 
 /*
  * the kernel's page table.
@@ -358,7 +359,7 @@ copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
       struct proc *p = myproc();
       if(p == 0 || pagetable != p->pagetable)
         return -1;
-      if(vmafault(p, dstva, 1) < 0)
+      if(vmafault(p, dstva, PROT_WRITE) < 0)
         return -1;
       pa0 = walkaddr(pagetable, va0);
       if(pa0 == 0)
@@ -394,7 +395,7 @@ copyin(pagetable_t pagetable, char *dst, uint64 srcva, uint64 len)
       struct proc *p = myproc();
       if(p == 0 || pagetable != p->pagetable)
         return -1;
-      if(vmafault(p, srcva, 0) < 0)
+      if(vmafault(p, srcva, PROT_READ) < 0)
         return -1;
       pa0 = walkaddr(pagetable, va0);
       if(pa0 == 0)
@@ -432,7 +433,7 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
       struct proc *p = myproc();
       if(p == 0 || pagetable != p->pagetable)
         return -1;
-      if(vmafault(p, srcva, 0) < 0)
+      if(vmafault(p, srcva, PROT_READ) < 0)
         return -1;
       pa0 = walkaddr(pagetable, va0);
       if(pa0 == 0)
