@@ -148,11 +148,10 @@ exec(char *path, char **argv)
         if(pte == 0 || (*pte & PTE_V) == 0)
           continue;
         uint64 pa = PTE2PA(*pte);
-
+        uint64 delta = va - v->addr;
+        uint64 file_offset = v->offset + delta;
         // exec 相当于解除所有旧映射，共享修改需要写回
         if(v->flags == MAP_SHARED && (v->prot & PROT_WRITE)){
-          uint64 delta = va - v->addr;
-          uint64 file_offset = v->offset + delta;
           uint64 n = PGSIZE;
           if(n > v->length - delta)
             n = v->length - delta;
@@ -164,7 +163,7 @@ exec(char *path, char **argv)
         }
         if(v->flags == MAP_SHARED){
           uvmunmap(oldpagetable, va, 1, 0);
-          mmapcache_put(pa);
+          mmapcache_put(v->file->ip, file_offset);
         } else {
           uvmunmap(oldpagetable, va, 1, 1);
         }

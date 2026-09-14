@@ -412,9 +412,9 @@ exit(int status)
         if(pte == 0 || !(*pte & PTE_V))
           continue;
         uint64 pa = PTE2PA(*pte);
+        uint64 delta = va - p->vmas[i].addr;
+        uint64 file_offset = p->vmas[i].offset + delta;
         if(p->vmas[i].flags == MAP_SHARED && (p->vmas[i].prot & PROT_WRITE)){
-          uint64 delta = va - p->vmas[i].addr;
-          uint64 file_offset = p->vmas[i].offset + delta;
           int n = PGSIZE;
           if(n > p->vmas[i].length - delta)
             n = p->vmas[i].length - delta;
@@ -426,7 +426,7 @@ exit(int status)
         }
         if(p->vmas[i].flags == MAP_SHARED){
           uvmunmap(p->pagetable, va, 1, 0);
-          mmapcache_put(pa);
+          mmapcache_put(p->vmas[i].file->ip, file_offset);
         } else 
           uvmunmap(p->pagetable, va, 1, 1);
       }

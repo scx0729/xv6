@@ -50,6 +50,7 @@ int             namecmp(const char*, const char*);
 struct inode*   namei(char*);
 struct inode*   nameiparent(char*, char*);
 int             readi(struct inode*, int, uint64, uint, uint);
+struct buf*     readb(struct inode*, uint);
 void            stati(struct inode*, struct stat*);
 int             writei(struct inode*, int, uint64, uint, uint);
 void            itrunc(struct inode*);
@@ -186,9 +187,9 @@ void            virtio_disk_intr(void);
 
 // mmapcache.c
 void            mmapcacheinit(void);
-uint64          mmapcache_get(struct inode *, uint64);
-uint64          mmapcache_insert(struct inode *, uint64, uint64);
-void            mmapcache_put(uint64);
+struct buf*     mmapcache_get(struct inode *, uint64);
+struct buf*     mmapcache_insert(struct inode *, uint64, struct buf*);
+void            mmapcache_put(struct inode*, uint64);
 
 // number of elements in fixed-size array
 #define NELEM(x) (sizeof(x)/sizeof((x)[0]))

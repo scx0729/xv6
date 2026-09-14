@@ -49,6 +49,9 @@ binit(void)
     initsleeplock(&b->lock, "buffer");
     bcache.head.next->prev = b;
     bcache.head.next = b;
+    b->data = kalloc();
+    if(b->data == 0)
+      panic("binit");
   }
 }
 

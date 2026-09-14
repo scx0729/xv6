@@ -9,6 +9,7 @@
 #include "sleeplock.h"
 #include "file.h"
 #include "fcntl.h"
+#include "buf.h"
 
 struct spinlock tickslock;
 uint ticks;
@@ -24,6 +25,7 @@ int
 vmafault(struct proc *p, uint64 fault_addr, int access)
 {
   struct vma *v = 0;
+  struct buf *bp = 0;
   for(int i = 0; i < MAX_VAM; i++){
     if(p->vmas[i].addr <= fault_addr && fault_addr < p->vmas[i].addr + p->vmas[i].length && p->vmas[i].type != VMA_UNUSED){
       v = &p->vmas[i];
@@ -37,25 +39,36 @@ vmafault(struct proc *p, uint64 fault_addr, int access)
   if((v->type == VMA_ELF || v->type == VMA_ANON) && fault_addr >= p->sz)
     return -1;
 
-  uint64 chosen_pa = 0;
+  uint64 pa = 0;
   uint64 page_va = PGROUNDDOWN(fault_addr);
+  uint64 delta = page_va - v->addr;
+  uint64 file_offset = v->offset + delta;
+  uint64 n = PGSIZE;
   if(v->type == VMA_FILE){
-    uint64 delta = page_va - v->addr;
-    uint64 file_offset = v->offset + delta;
-    uint64 n = PGSIZE;
     if(n > v->length - delta)
       n = v->length - delta;
 
     if(v->flags == MAP_SHARED){
-      chosen_pa = mmapcache_get(v->file->ip, file_offset);
-    }
-
-    if(chosen_pa == 0){
+      bp = mmapcache_get(v->file->ip, file_offset);
+      if(bp == 0){
+        struct buf *newbp = 0;
+        ilock(v->file->ip);
+        if((newbp = readb(v->file->ip, file_offset)) == 0){
+          iunlock(v->file->ip);
+          return -1;
+        }
+        iunlock(v->file->ip);
+        bp = mmapcache_insert(v->file->ip, file_offset, newbp);
+        brelse(newbp);
+        if(bp == 0)
+          return -1;
+      }
+      pa = (uint64)bp->data;
+    } else {
       void *mem = kalloc();
       if(mem == 0)
         return -1;
       memset(mem, 0, PGSIZE);
-      chosen_pa = (uint64)mem;
       ilock(v->file->ip);
       if(readi(v->file->ip, 0, (uint64)mem, file_offset, n) < 0){
         iunlock(v->file->ip);
@@ -63,32 +76,19 @@ vmafault(struct proc *p, uint64 fault_addr, int access)
         return -1;
       }
       iunlock(v->file->ip);
-      if(v->flags == MAP_SHARED){
-        uint64 ret_pa = mmapcache_insert(v->file->ip, file_offset, chosen_pa);
-        if(ret_pa == 0){
-          kfree((void*)chosen_pa);
-          return -1;
-        } else if (ret_pa != 0 && ret_pa != chosen_pa){
-          kfree((void*)chosen_pa);
-          chosen_pa = ret_pa;
-        }
-      } else if (v->flags == MAP_PRIVATE)
-        chosen_pa = (uint64)mem;
+      pa = (uint64)mem;
     }
   } else if (v->type == VMA_ANON){
     void *mem = kalloc();
     if(mem == 0)
       return -1;
     memset(mem, 0, PGSIZE);
-    chosen_pa = (uint64)mem;
+    pa = (uint64)mem;
   } else if (v->type == VMA_ELF){
     void *mem = kalloc();
     if(mem == 0)
       return -1;
     memset(mem, 0, PGSIZE);
-    uint64 delta = page_va - v->addr;
-    uint64 file_offset = v->offset + delta;
-    uint64 n = PGSIZE;
     if(v->file_length > delta){
       if(n > v->file_length - delta)
         n = v->file_length - delta;
@@ -100,7 +100,7 @@ vmafault(struct proc *p, uint64 fault_addr, int access)
       }
       iunlock(v->ip);
     }
-    chosen_pa = (uint64)mem;
+    pa = (uint64)mem;
   }
 
   int flags = PTE_U;
@@ -110,11 +110,11 @@ vmafault(struct proc *p, uint64 fault_addr, int access)
     flags |= PTE_R | PTE_W;
   if(v->prot & PROT_EXEC)
     flags |= PTE_X;
-  if(mappages(p->pagetable, page_va, PGSIZE, chosen_pa, flags) < 0){
+  if(mappages(p->pagetable, page_va, PGSIZE, pa, flags) < 0){
     if(v->type == VMA_FILE && v->flags == MAP_SHARED)
-      mmapcache_put(chosen_pa);
+      mmapcache_put(v->file->ip, file_offset);
     else
-      kfree((void*)chosen_pa);
+      kfree((void*)pa);
     return -1;
   }
   return 0;

@@ -563,9 +563,9 @@ sys_munmap(void)
     if(pte == 0 || !(*pte & PTE_V))
       continue;
     uint64 pa = PTE2PA(*pte);
+    uint64 delta = va - v->addr;
+    uint64 file_offset = v->offset + delta;
     if(v->flags == MAP_SHARED && (v->prot & PROT_WRITE)){
-      uint64 delta = va - v->addr;
-      uint64 file_offset = v->offset + delta;
       int n = PGSIZE;
       if(n > v->length - delta)
         n = v->length - delta;
@@ -581,7 +581,7 @@ sys_munmap(void)
     }
     if(v->flags == MAP_SHARED){
       uvmunmap(p->pagetable, va, 1, 0);
-      mmapcache_put(pa);
+      mmapcache_put(v->file->ip, file_offset);
     } else 
       uvmunmap(p->pagetable, va, 1, 1);
   }

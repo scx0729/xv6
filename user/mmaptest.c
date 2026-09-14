@@ -8,6 +8,7 @@
 
 void mmap_test();
 void fork_test();
+void shared_buffer_test();
 char buf[BSIZE];
 
 #define MAP_FAILED ((char *) -1)
@@ -16,6 +17,7 @@ int
 main(int argc, char *argv[])
 {
   mmap_test();
+  shared_buffer_test();
   fork_test();
   printf("mmaptest: all tests succeeded\n");
   exit(0);
@@ -59,18 +61,18 @@ _v1(char *p)
 void
 makefile(const char *f)
 {
-  int i;
-  int n = PGSIZE/BSIZE;
-
   unlink(f);
   int fd = open(f, O_WRONLY | O_CREATE);
   if (fd == -1)
     err("open");
   memset(buf, 'A', BSIZE);
   // write 1.5 page
-  for (i = 0; i < n + n/2; i++) {
-    if (write(fd, buf, BSIZE) != BSIZE)
+  int remaining = PGSIZE + PGSIZE/2;
+  while(remaining > 0){
+    int n = remaining < BSIZE ? remaining : BSIZE;
+    if(write(fd, buf, n) != n)
       err("write 0 makefile");
+    remaining -= n;
   }
   if (close(fd) == -1)
     err("close");
@@ -242,6 +244,52 @@ mmap_test(void)
   printf("mmap_test: ALL OK\n");
 }
 
+// Verify that shared mappings use the same buffer-cache page.
+void
+shared_buffer_test(void)
+{
+  const char * const f = "mmap.buf";
+  testname = "shared_buffer_test";
+  printf("shared_buffer_test starting\n");
+
+  unlink(f);
+  int fd = open(f, O_CREATE | O_RDWR);
+  if(fd < 0)
+    err("open create");
+  memset(buf, 'A', BSIZE);
+  if(write(fd, buf, BSIZE) != BSIZE)
+    err("write");
+  if(close(fd) < 0)
+    err("close create");
+
+  fd = open(f, O_RDWR);
+  if(fd < 0)
+    err("open shared");
+  char *p1 = mmap(0, PGSIZE, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+  char *p2 = mmap(0, PGSIZE, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+  if(p1 == MAP_FAILED || p2 == MAP_FAILED)
+    err("mmap");
+
+  // Fault both mappings in before changing the shared page.
+  if(p1[0] != 'A' || p2[0] != 'A')
+    err("initial contents");
+  p1[0] = 'Z';
+  if(p2[0] != 'Z')
+    err("mappings do not share a page");
+
+  // A normal file read should observe the same buffer-cache data.
+  char c = 0;
+  if(read(fd, &c, 1) != 1 || c != 'Z')
+    err("mapping does not use buffer cache");
+
+  if(munmap(p1, PGSIZE) < 0 || munmap(p2, PGSIZE) < 0)
+    err("munmap");
+  if(close(fd) < 0)
+    err("close shared");
+  unlink(f);
+  printf("shared_buffer_test: OK\n");
+}
+
 //
 // mmap a file, then fork.
 // check that the child sees the mapped file.
@@ -294,4 +342,3 @@ fork_test(void)
 
   printf("fork_test OK\n");
 }
-

@@ -448,6 +448,14 @@ stati(struct inode *ip, struct stat *st)
   st->size = ip->size;
 }
 
+struct buf*
+readb(struct inode *ip, uint off)
+{
+  struct buf *bp = 0;
+  bp = bread(ip->dev, bmap(ip, off/BSIZE));
+  return bp;
+}
+
 // Read data from inode.
 // Caller must hold ip->lock.
 // If user_dst==1, then dst is a user virtual address;
