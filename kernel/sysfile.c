@@ -10,9 +10,9 @@
 #include "param.h"
 #include "stat.h"
 #include "spinlock.h"
+#include "sleeplock.h"
 #include "proc.h"
 #include "fs.h"
-#include "sleeplock.h"
 #include "file.h"
 #include "fcntl.h"
 #include "memlayout.h"
@@ -509,15 +509,17 @@ sys_mmap(void)
   if(map_length < length)
     return -1;
   uint64 top = TRAPFRAME;
+  uint64 result = -1;
+  acquiresleep(&p->vm_lock);
   for(int i = 0;i < MAX_VAM;i++){
     if(p->vmas[i].type == VMA_FILE && p->vmas[i].addr < top)
       top = p->vmas[i].addr;
   }
   if(top < map_length)
-    return -1;
+    goto out;
   uint64 map_addr = top - map_length;
   if(map_addr < PGROUNDUP(p->sz))
-    return -1;
+    goto out;
   struct vma *v = 0;
   for(int i = 0;i < MAX_VAM;i++){
     if(p->vmas[i].type == VMA_UNUSED){
@@ -526,7 +528,7 @@ sys_mmap(void)
     }
   }
   if(v == 0)
-    return -1;
+    goto out;
   v->addr = map_addr;
   v->length = length;
   v->prot = prot;
@@ -534,7 +536,11 @@ sys_mmap(void)
   v->file = filedup(f);
   v->offset = offset;
   v->type = VMA_FILE;
-  return map_addr;
+  result = map_addr;
+  goto out;
+  out:
+  releasesleep(&p->vm_lock);
+  return result;
 }
 
 uint64
@@ -547,6 +553,8 @@ sys_munmap(void)
     return -1;
   uint64 end = addr + length;
   struct proc *p = myproc();
+  int result = -1;
+  acquiresleep(&p->vm_lock);
   struct vma *v = 0;
   for(int i = 0;i < MAX_VAM;i++){
     if(p->vmas[i].type == VMA_FILE && p->vmas[i].addr <= addr && p->vmas[i].addr + p->vmas[i].length >= end){
@@ -555,9 +563,9 @@ sys_munmap(void)
     }
   }
   if(v == 0)
-    return -1;
+    goto out;
   if(addr > v->addr && end < v->addr + v->length)
-    return -1;
+    goto out;
   for(uint64 va = addr;va < addr + length;va += PGSIZE){
     pte_t *pte = walk(p->pagetable, va, 0);
     if(pte == 0 || !(*pte & PTE_V))
@@ -574,7 +582,7 @@ sys_munmap(void)
       if(writei(v->file->ip, 0, pa, file_offset, n) < n){
         iunlock(v->file->ip);
         end_op();
-        return -1;
+        goto out;
       }
       iunlock(v->file->ip);
       end_op();
@@ -596,5 +604,9 @@ sys_munmap(void)
     v->length -= length;
     v->offset += length;
   }
-  return 0;
+  result = 0;
+  goto out;
+  out:
+  releasesleep(&p->vm_lock);
+  return result;
 }

@@ -5,6 +5,7 @@
 #include "param.h"
 #include "memlayout.h"
 #include "spinlock.h"
+#include "sleeplock.h"
 #include "proc.h"
 
 uint64
@@ -21,6 +22,36 @@ uint64
 sys_getpid(void)
 {
   return myproc()->pid;
+}
+
+// Test-only inspection of swap state. 0: this process's swapped pages;
+// 1: allocated swap slots across all processes.
+uint64
+sys_swapstat(void)
+{
+  int mode;
+  if(argint(0, &mode) < 0)
+    return -1;
+  if(mode == 1)
+    return swapused();
+  if(mode != 0)
+    return -1;
+
+  struct proc *p = myproc();
+  int count = 0;
+  acquiresleep(&p->vm_lock);
+  for(int i = 0; i < MAX_VAM; i++){
+    struct vma *v = &p->vmas[i];
+    if(v->type != VMA_ANON)
+      continue;
+    for(uint64 va = PGROUNDDOWN(v->addr); va < PGROUNDUP(v->addr + v->length); va += PGSIZE){
+      pte_t *pte = walk(p->pagetable, va, 0);
+      if(pte && (*pte & PTE_SWAP) && !(*pte & PTE_V))
+        count++;
+    }
+  }
+  releasesleep(&p->vm_lock);
+  return count;
 }
 
 uint64

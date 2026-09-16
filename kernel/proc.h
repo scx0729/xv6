@@ -98,6 +98,8 @@ struct vma{
 // Per-process state
 struct proc {
   struct spinlock lock;
+  struct sleeplock vm_lock;
+  int vm_busy;
 
   // p->lock must be held when using these:
   enum procstate state;        // Process state

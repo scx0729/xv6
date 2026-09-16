@@ -3,10 +3,10 @@
 #include "memlayout.h"
 #include "riscv.h"
 #include "spinlock.h"
+#include "sleeplock.h"
 #include "proc.h"
 #include "defs.h"
 #include "fs.h"
-#include "sleeplock.h"
 #include "file.h"
 #include "fcntl.h"
 
@@ -56,6 +56,7 @@ procinit(void)
   initlock(&wait_lock, "wait_lock");
   for(p = proc; p < &proc[NPROC]; p++) {
       initlock(&p->lock, "proc");
+      initsleeplock(&p->vm_lock, "vm_lock");
       p->kstack = KSTACK((int) (p - proc));
   }
 }
@@ -154,6 +155,14 @@ found:
 static void
 freeproc(struct proc *p)
 {
+  // freeproc is entered with p->lock held, but VM operations use the
+  // vm_lock -> p->lock order. Keep the slot non-UNUSED while changing
+  // locks so allocproc cannot reuse it.
+  p->vm_busy = 1;
+  release(&p->lock);
+  acquiresleep(&p->vm_lock);
+  acquire(&p->lock);
+
   if(p->trapframe)
     kfree((void*)p->trapframe);
   p->trapframe = 0;
@@ -168,6 +177,14 @@ freeproc(struct proc *p)
   p->killed = 0;
   p->xstate = 0;
   memset(p->vmas, 0, sizeof(p->vmas));
+
+  // releasesleep() may wake processes and acquire process locks, so do
+  // not call it while holding p->lock. The non-UNUSED state still keeps
+  // this proc slot from being reused.
+  release(&p->lock);
+  releasesleep(&p->vm_lock);
+  acquire(&p->lock);
+  p->vm_busy = 0;
   p->state = UNUSED;
 }
 
@@ -260,6 +277,8 @@ growproc(int n)
   uint64 sz;
   struct proc *p = myproc();
 
+  int result = -1;
+  acquiresleep(&p->vm_lock);
   sz = p->sz;
   uint64 newsz = sz + n;
   if(n > 0){
@@ -275,14 +294,14 @@ growproc(int n)
           mmap_top = p->vmas[i].addr;
     }
     if(newsz < sz)
-      return -1;
+      goto out;
     if(newsz > mmap_top)
-      return -1;
+      goto out;
     if(!anon && !unused)
-      return -1;
+      goto out;
     if(anon){
       if(anon->addr + anon->length != sz)
-        return -1;
+        goto out;
       anon->length += n;
     }
     else if (unused){
@@ -297,7 +316,7 @@ growproc(int n)
   } else if (n < 0){
     uint64 decrease = (uint64)(-(long)n);
     if(decrease > sz)
-      return -1;
+      goto out;
     uvmdealloc(p->pagetable, sz, newsz);
     struct vma *anon = 0;
     for(int i = 0;i < MAX_VAM;i++){
@@ -315,7 +334,11 @@ growproc(int n)
     }
   }
   p->sz = newsz;
-  return 0;
+  result = 0;
+  goto out;
+  out:
+  releasesleep(&p->vm_lock);
+  return result;
 }
 
 // Create a new process, copying the parent.
@@ -332,28 +355,38 @@ fork(void)
     return -1;
   }
 
-  // Copy user memory from parent to child.
-  if(uvmcopy(p->pagetable, np->pagetable, p->sz) < 0){
+  // Copying swapped pages may sleep during disk I/O. The new process is
+  // still USED and cannot run, so its spinlock need not be held here.
+  release(&np->lock);
+  acquiresleep(&p->vm_lock);
+  uint64 parent_sz = p->sz;
+  int copy_result = uvmcopy(p->pagetable, np->pagetable, parent_sz);
+  if(copy_result == 0){
+    np->sz = parent_sz;
+
+    // Copy saved user registers.
+    *(np->trapframe) = *(p->trapframe);
+
+    // Cause fork to return 0 in the child.
+    np->trapframe->a0 = 0;
+
+    for(int i = 0;i < MAX_VAM;i++){
+      if(p->vmas[i].type != VMA_UNUSED){
+        np->vmas[i] = p->vmas[i];
+        if(np->vmas[i].type == VMA_FILE)
+          filedup(np->vmas[i].file);
+        if(np->vmas[i].type == VMA_ELF)
+          idup(np->vmas[i].ip);
+      }
+    }
+  }
+  releasesleep(&p->vm_lock);
+
+  acquire(&np->lock);
+  if(copy_result < 0){
     freeproc(np);
     release(&np->lock);
     return -1;
-  }
-  np->sz = p->sz;
-
-  // copy saved user registers.
-  *(np->trapframe) = *(p->trapframe);
-
-  // Cause fork to return 0 in the child.
-  np->trapframe->a0 = 0;
-
-  for(int i = 0;i < MAX_VAM;i++){
-    if(p->vmas[i].type != VMA_UNUSED){
-      np->vmas[i] = p->vmas[i];
-      if(np->vmas[i].type == VMA_FILE)
-        filedup(np->vmas[i].file);
-      if(np->vmas[i].type == VMA_ELF)
-        idup(np->vmas[i].ip);
-    }
   }
 
   // increment reference counts on open file descriptors.
@@ -405,10 +438,19 @@ exit(int status)
   if(p == initproc)
     panic("init exiting");
 
+  acquiresleep(&p->vm_lock);
+
   for(int i = 0;i < MAX_VAM;i++){
     if(p->vmas[i].type == VMA_FILE){
       for(uint64 va = p->vmas[i].addr;va < p->vmas[i].addr + p->vmas[i].length;va += PGSIZE){
         pte_t *pte = walk(p->pagetable, va, 0);
+        if(pte && (*pte & PTE_V) == 0 && (*pte & PTE_SWAP)){
+          int slot = PTE2SWAP(*pte);
+          if(swapfree(slot) < 0)
+            panic("exit: swapfree slot");
+          *pte = 0;
+          continue;
+        }
         if(pte == 0 || !(*pte & PTE_V))
           continue;
         uint64 pa = PTE2PA(*pte);
@@ -439,7 +481,9 @@ exit(int status)
       end_op();
       memset(&p->vmas[i], 0, sizeof(p->vmas[i]));
     }
-  }  
+  }
+
+  releasesleep(&p->vm_lock);
 
   // Close all open files.
   for(int fd = 0; fd < NOFILE; fd++){
@@ -544,7 +588,7 @@ scheduler(void)
 
     for(p = proc; p < &proc[NPROC]; p++) {
       acquire(&p->lock);
-      if(p->state == RUNNABLE) {
+      if(p->state == RUNNABLE && !p->vm_busy) {
         // Switch to chosen process.  It is the process's job
         // to release its lock and then reacquire it
         // before jumping back to us.
@@ -750,4 +794,16 @@ procdump(void)
     printf("%d %s %s", p->pid, state, p->name);
     printf("\n");
   }
+}
+
+int
+pageout_any()
+{
+  struct proc *p;
+  for(p = proc; p < &proc[NPROC]; p++){
+    if(pageout(p) == 0){
+      return 0;
+    }
+  }
+  return -1;
 }

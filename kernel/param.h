@@ -12,3 +12,4 @@
 #define FSSIZE       2000  // size of file system in blocks
 #define MAXPATH      128   // maximum file path name
 #define MAX_VAM       16   // maximum number of VMAs per process
+#define NSWAP        128

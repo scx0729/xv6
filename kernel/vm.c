@@ -6,8 +6,10 @@
 #include "defs.h"
 #include "fs.h"
 #include "spinlock.h"
+#include "sleeplock.h"
 #include "proc.h"
 #include "fcntl.h"
+#include "param.h"
 
 /*
  * the kernel's page table.
@@ -178,6 +180,13 @@ uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
   for(a = va; a < va + npages*PGSIZE; a += PGSIZE){
     if((pte = walk(pagetable, a, 0)) == 0)
       continue;
+    if((*pte & PTE_V) == 0 && (*pte & PTE_SWAP)){
+      int slot = PTE2SWAP(*pte);
+      if(swapfree(slot) < 0)
+        panic("uvmunmap: swapfree slot");
+      *pte = 0;
+      continue;
+    }
     if((*pte & PTE_V) == 0)
       continue;
     if(PTE_FLAGS(*pte) == PTE_V)
@@ -312,12 +321,43 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
   for(i = 0; i < sz; i += PGSIZE){
     if((pte = walk(old, i, 0)) == 0)
       continue;
+    if((*pte & PTE_V) == 0 && (*pte & PTE_SWAP)){
+      int parent_slot = PTE2SWAP(*pte);
+      int child_slot = swapalloc();
+      if(child_slot < 0)
+        goto err;
+      if(swapcopy(parent_slot, child_slot) < 0){
+        swapfree(child_slot);
+        goto err;
+      }
+      pte_t *child_pte = walk(new, i, 1);
+      if(child_pte == 0){
+        swapfree(child_slot);
+        goto err;
+      }
+      *child_pte = SWAP2PTE(child_slot) | (*pte & (PTE_U | PTE_R | PTE_W | PTE_X)) | PTE_SWAP;
+      continue;
+    }
     if((*pte & PTE_V) == 0)
       continue;
     pa = PTE2PA(*pte);
     flags = PTE_FLAGS(*pte);
-    if((mem = kalloc()) == 0)
-      goto err;
+    if((mem = kalloc()) == 0){
+      int child_slot = swapalloc();
+      if(child_slot < 0)
+        goto err;
+      if(swapwrite(child_slot, pa) < 0){
+        swapfree(child_slot);
+        goto err;
+      }
+      pte_t *child_pte = walk(new, i, 1);
+      if(child_pte == 0){
+        swapfree(child_slot);
+        goto err;
+      }
+      *child_pte = SWAP2PTE(child_slot) | (*pte & (PTE_U | PTE_R | PTE_W | PTE_X)) | PTE_SWAP;
+      continue;
+    }
     memmove(mem, (char*)pa, PGSIZE);
     if(mappages(new, i, PGSIZE, (uint64)mem, flags) != 0){
       kfree(mem);
@@ -468,4 +508,118 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
   } else {
     return -1;
   }
+}
+
+int
+pageout(struct proc *p)
+{
+  if(p == 0)
+    return -1;
+
+  struct proc *current = myproc();
+  int is_current = p == current;
+  acquiresleep(&p->vm_lock);
+  acquire(&p->lock);
+  int eligible = p->state == SLEEPING || p->state == RUNNABLE || (p->state == RUNNING && is_current);
+  int result = -1;
+  if(p->pagetable == 0 || p->vm_busy || !eligible){
+    release(&p->lock);
+    releasesleep(&p->vm_lock);
+    return -1;
+  }
+  if(!is_current)
+    p->vm_busy = 1;
+  release(&p->lock);
+
+  for(int i = 0;i < MAX_VAM;i++){
+    struct vma v = p->vmas[i];
+    if(v.type == VMA_ANON){
+      uint64 start = PGROUNDDOWN(v.addr);
+      uint64 end = PGROUNDUP(v.addr + v.length);
+      for(uint64 va = start;va < end;va += PGSIZE){
+        pte_t *pte = walk(p->pagetable, va, 0);
+        if(pte && (*pte & PTE_V) && (*pte & PTE_U) && (*pte & (PTE_R | PTE_W | PTE_X))){
+          uint64 pa = PTE2PA(*pte);
+          int slot = swapalloc();
+          if(slot < 0)
+            goto done;
+          if(swapwrite(slot, pa) < 0){
+            swapfree(slot);
+            goto done;
+          }
+          uint64 perm = *pte & (PTE_U | PTE_R | PTE_W | PTE_X);
+          *pte = perm | SWAP2PTE(slot) | PTE_SWAP;
+          sfence_vma();
+          kfree((void*)pa);
+          result = 0;
+          goto done;
+        }
+      }
+    }
+  }
+
+done:
+  acquire(&p->lock);
+  if(!is_current)
+    p->vm_busy = 0;
+  release(&p->lock);
+  releasesleep(&p->vm_lock);
+  return result;
+}
+
+int
+pagein(struct proc *p, uint64 fault_addr)
+{
+  if(p == 0 || fault_addr >= MAXVA)
+    return -1;
+
+  uint64 va = PGROUNDDOWN(fault_addr);
+  acquiresleep(&p->vm_lock);
+  pte_t *pte = walk(p->pagetable, va, 0);
+  if(pte == 0 || (*pte & PTE_V) || !(*pte & PTE_SWAP) || !(*pte & PTE_U)){
+    releasesleep(&p->vm_lock);
+    return -1;
+  }
+  releasesleep(&p->vm_lock);
+
+  // Allocation may evict a page from this process, so it must happen
+  // without holding p->vm_lock. Revalidate the PTE after reacquiring it.
+  char* mem = userpagealloc(p);
+  if(mem == 0)
+    return -1;
+
+  acquiresleep(&p->vm_lock);
+  pte = walk(p->pagetable, va, 0);
+  if(pte == 0 || (*pte & PTE_V) || !(*pte & PTE_SWAP) || !(*pte & PTE_U)){
+    releasesleep(&p->vm_lock);
+    kfree(mem);
+    return -1;
+  }
+
+  int slot = PTE2SWAP(*pte);
+  uint64 perm = *pte & (PTE_U | PTE_R | PTE_W | PTE_X);
+  if(swapread(slot, (uint64)mem) < 0){
+    releasesleep(&p->vm_lock);
+    kfree(mem);
+    return -1;
+  }
+  *pte = perm | PA2PTE((uint64)mem) | PTE_V;
+  sfence_vma();
+  if(swapfree(slot) < 0)
+    panic("pagein: swapfree");
+  releasesleep(&p->vm_lock);
+  return 0;
+}
+
+void*
+userpagealloc(struct proc *p)
+{
+  void* mem = kalloc();
+  int count = 0;
+  while(mem == 0 && count++ < 5){
+    if(p == 0 || pageout_any() < 0)
+      return 0;
+    mem = kalloc();
+  }
+  return mem;
 }

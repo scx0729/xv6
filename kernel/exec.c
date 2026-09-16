@@ -3,12 +3,12 @@
 #include "memlayout.h"
 #include "riscv.h"
 #include "spinlock.h"
+#include "sleeplock.h"
 #include "proc.h"
 #include "defs.h"
 #include "elf.h"
 #include "fcntl.h"
 #include "fs.h"
-#include "sleeplock.h"
 #include "file.h"
 
 
@@ -31,7 +31,7 @@ exec(char *path, char **argv)
 {
   char *s, *last;
   int i, off, vma_count = 0;
-  uint64 argc, sz = 0, sp, ustack[MAXARG], stackbase;
+  uint64 argc, sz = 0, oldsz, sp, ustack[MAXARG], stackbase;
   struct elfhdr elf;
   struct inode *ip;
   struct proghdr ph;
@@ -92,8 +92,6 @@ exec(char *path, char **argv)
   ip = 0;
 
   p = myproc();
-  uint64 oldsz = p->sz;
-
   // Allocate two pages at the next page boundary.
   // Use the second as the user stack.
   sz = PGROUNDUP(sz);
@@ -127,24 +125,30 @@ exec(char *path, char **argv)
   if(copyout(pagetable, sp, (char *)ustack, (argc+1)*sizeof(uint64)) < 0)
     goto bad;
 
-  // arguments to user main(argc, argv)
-  // argc is returned via the system call return
-  // value, which goes in a0.
-  p->trapframe->a1 = sp;
-
   // Save program name for debugging.
   for(last=s=path; *s; s++)
     if(*s == '/')
       last = s+1;
-  safestrcpy(p->name, last, sizeof(p->name));
-    
+
+  // vm_lock waits without spinning and protects the page table, size,
+  // and VMAs. p->lock only protects the short vm_busy update.
+  acquiresleep(&p->vm_lock);
+
   // Commit to the user image.
+  oldsz = p->sz;
   oldpagetable = p->pagetable;
   for(int i = 0;i < MAX_VAM;i++){
     struct vma *v = &p->vmas[i];
     if(v->type == VMA_FILE){
       for(uint64 va = v->addr; va < v->addr + v->length; va += PGSIZE){
         pte_t *pte = walk(oldpagetable, va, 0);
+        if(pte && (*pte & PTE_V) == 0 && (*pte & PTE_SWAP)){
+          int slot = PTE2SWAP(*pte);
+          if(swapfree(slot) < 0)
+            panic("exec: swapfree slot");
+          *pte = 0;
+          continue;
+        }
         if(pte == 0 || (*pte & PTE_V) == 0)
           continue;
         uint64 pa = PTE2PA(*pte);
@@ -181,9 +185,14 @@ exec(char *path, char **argv)
 
   p->pagetable = pagetable;
   p->sz = sz;
+  // Arguments to user main(argc, argv). argc is returned through a0.
+  p->trapframe->a1 = sp;
   p->trapframe->epc = elf.entry;  // initial program counter = main
   p->trapframe->sp = sp; // initial stack pointer
+  safestrcpy(p->name, last, sizeof(p->name));
   proc_freepagetable(oldpagetable, oldsz);
+
+  releasesleep(&p->vm_lock);
 
   return argc; // this ends up in a0, the first argument to main(argc, argv)
 

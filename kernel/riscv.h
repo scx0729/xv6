@@ -343,11 +343,16 @@ sfence_vma()
 #define PTE_W (1L << 2)
 #define PTE_X (1L << 3)
 #define PTE_U (1L << 4) // 1 -> user can access
+#define PTE_SWAP (1L << 8)
 
 // shift a physical address to the right place for a PTE.
 #define PA2PTE(pa) ((((uint64)pa) >> 12) << 10)
 
 #define PTE2PA(pte) (((pte) >> 10) << 12)
+
+#define SWAP2PTE(slot) ((uint64)slot << 10)
+
+#define PTE2SWAP(pte) ((uint64)pte >> 10)
 
 #define PTE_FLAGS(pte) ((pte) & 0x3FF)
 

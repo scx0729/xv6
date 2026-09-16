@@ -31,7 +31,8 @@ OBJS = \
   $K/kernelvec.o \
   $K/plic.o \
   $K/virtio_disk.o \
-  $K/mmapcache.o
+  $K/mmapcache.o \
+  $K/swap.o
 
 OBJS_KCSAN = \
   $K/start.o \
@@ -190,6 +191,9 @@ UPROGS=\
 	$U/_wc\
 	$U/_zombie\
 	$U/_mmaptest\
+	$U/_swaptest\
+	$U/_swapforktest\
+	$U/_swapexhausttest\
 
 ifeq ($(LAB),$(filter $(LAB), lock))
 UPROGS += \

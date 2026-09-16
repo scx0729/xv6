@@ -105,6 +105,7 @@ void            yield(void);
 int             either_copyout(int user_dst, uint64 dst, void *src, uint64 len);
 int             either_copyin(void *dst, int user_src, uint64 src, uint64 len);
 void            procdump(void);
+int             pageout_any();
 
 // swtch.S
 void            swtch(struct context*, struct context*);
@@ -173,6 +174,9 @@ uint64          walkaddr(pagetable_t, uint64);
 int             copyout(pagetable_t, uint64, char *, uint64);
 int             copyin(pagetable_t, char *, uint64, uint64);
 int             copyinstr(pagetable_t, char *, uint64, uint64);
+int             pageout(struct proc*);
+int             pagein(struct proc*, uint64);
+void*           userpagealloc(struct proc*);
 
 // plic.c
 void            plicinit(void);
@@ -190,6 +194,15 @@ void            mmapcacheinit(void);
 struct buf*     mmapcache_get(struct inode *, uint64);
 struct buf*     mmapcache_insert(struct inode *, uint64, struct buf*);
 void            mmapcache_put(struct inode*, uint64);
+
+// swap.c
+void            swapinit(void);
+int             swapalloc(void);
+int             swapfree(int);
+int             swapwrite(int, uint64);
+int             swapread(int, uint64);
+int             swapcopy(int, int);
+int             swapused(void);
 
 // number of elements in fixed-size array
 #define NELEM(x) (sizeof(x)/sizeof((x)[0]))
