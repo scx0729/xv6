@@ -21,6 +21,16 @@ static volatile uint32 *regs;
 
 struct spinlock e1000_lock;
 
+#define TX_SW_LIMIT 64
+static struct mbufq txq;
+static int tx_queued = 0;
+
+#define TX_HW_LIMIT (TX_RING_SIZE - 1)
+static int tx_inflight = 0;
+static int tx_clean = 0;
+static void tx_reclaim();
+static void tx_fill();
+
 // called by pci_init().
 // xregs is the memory address at which the
 // e1000's registers are mapped.
@@ -85,30 +95,26 @@ e1000_init(uint32 *xregs)
     E1000_RCTL_BAM |                 // enable broadcast
     E1000_RCTL_SZ_2048 |             // 2048-byte rx buffers
     E1000_RCTL_SECRC;                // strip CRC
+
+  mbufq_init(&txq);
   
   // ask e1000 for receive interrupts.
   regs[E1000_RDTR] = 0; // interrupt after every received packet (no timer)
   regs[E1000_RADV] = 0; // interrupt after every packet (no timer)
-  regs[E1000_IMS] = (1 << 7); // RXDW -- Receiver Descriptor Write Back
+  regs[E1000_IMS] = E1000_ICR_TXDW | E1000_ICR_RXT0; // enable TX completion and RX interrupts
 }
 
 int
 e1000_transmit(struct mbuf *m)
 {
   acquire(&e1000_lock);
-  uint32 index = regs[E1000_TDT];
-  if((tx_ring[index].status & E1000_TXD_STAT_DD) == 0){
+  if(tx_queued >= TX_SW_LIMIT){
     release(&e1000_lock);
     return -1;
   }
-  if(tx_mbufs[index] != 0)
-    mbuffree(tx_mbufs[index]);
-  tx_ring[index].addr = (uint64)m->head;
-  tx_ring[index].length = m->len;
-  tx_ring[index].cmd = E1000_TXD_CMD_RS | E1000_TXD_CMD_EOP;
-  tx_ring[index].status = 0;
-  tx_mbufs[index] = m;
-  regs[E1000_TDT] = (index + 1) % TX_RING_SIZE;
+  mbufq_pushtail(&txq, m);
+  tx_queued++;
+  tx_fill();
   release(&e1000_lock);
   return 0;
 }
@@ -117,7 +123,7 @@ static void
 e1000_recv(void)
 {
   uint32 index = (regs[E1000_RDT] + 1) % RX_RING_SIZE;
-  while((rx_ring[index].status & E1000_RXD_STAT_DD) == 1){
+  while((rx_ring[index].status & E1000_RXD_STAT_DD) != 0){
     struct mbuf *m = rx_mbufs[index];
     // m->head = (char*)rx_ring[index].addr;
     m->len = rx_ring[index].length;
@@ -140,7 +146,51 @@ e1000_intr(void)
   // tell the e1000 we've seen this interrupt;
   // without this the e1000 won't raise any
   // further interrupts.
-  regs[E1000_ICR] = 0xffffffff;
+  uint32 icr = regs[E1000_ICR];
+  if(icr & E1000_ICR_TXDW){
+    acquire(&e1000_lock);
+    tx_reclaim();
+    tx_fill();
+    release(&e1000_lock);
+  }
 
-  e1000_recv();
+  if(icr & E1000_ICR_RXT0){
+    e1000_recv();
+  }
+}
+
+static void
+tx_reclaim()
+{
+  while(tx_inflight > 0 && (tx_ring[tx_clean].status & E1000_TXD_STAT_DD) != 0){
+    if(tx_mbufs[tx_clean] != 0){
+      mbuffree(tx_mbufs[tx_clean]);
+      tx_mbufs[tx_clean] = 0;
+    }
+    tx_inflight--;
+    tx_clean = (tx_clean + 1) % TX_RING_SIZE;
+  }
+}
+
+static void
+tx_fill()
+{
+  while(tx_inflight < TX_HW_LIMIT){
+    if(mbufq_empty(&txq))
+      break;
+    int index = regs[E1000_TDT];
+    if((tx_ring[index].status & E1000_TXD_STAT_DD) == 0)
+      break;
+    struct mbuf *m = mbufq_pophead(&txq);
+    if(m == 0)
+      break;
+    tx_ring[index].addr = (uint64)m->head;
+    tx_ring[index].length = m->len;
+    tx_ring[index].cmd = E1000_TXD_CMD_RS | E1000_TXD_CMD_EOP;
+    tx_ring[index].status = 0;
+    tx_mbufs[index] = m;
+    tx_queued--;
+    tx_inflight++;
+    regs[E1000_TDT] = (index + 1) % TX_RING_SIZE;
+  }
 }

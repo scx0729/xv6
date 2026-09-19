@@ -24,6 +24,10 @@
 #define E1000_MTA      (0x05200/4)  /* Multicast Table Array - RW Array */
 #define E1000_RA       (0x05400/4)  /* Receive Address - RW Array */
 
+/* Interrupt Cause Read / Interrupt Mask Set bits */
+#define E1000_ICR_TXDW 0x00000001  /* Transmit Descriptor Written Back */
+#define E1000_ICR_RXT0 0x00000080  /* Receiver Timer Interrupt */
+
 /* Device Control */
 #define E1000_CTL_SLU     0x00000040    /* set link up */
 #define E1000_CTL_FRCSPD  0x00000800    /* force speed */

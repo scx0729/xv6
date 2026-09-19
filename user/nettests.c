@@ -48,6 +48,46 @@ ping(uint16 sport, uint16 dport, int attempts)
   }
 }
 
+// Queue more packets than the TX ring can hold, then receive every reply.
+// Packets left in the software queue can only make progress through TX
+// completion interrupts because no more writes occur during the read phase.
+static void
+txburst(uint16 sport, uint16 dport)
+{
+  const int packets = 64;
+  char *obuf = "tx interrupt refill";
+  uint32 dst = (10 << 24) | (0 << 16) | (2 << 8) | (2 << 0);
+  int fd = connect(dst, sport, dport);
+
+  if(fd < 0){
+    fprintf(2, "txburst: connect() failed\n");
+    exit(1);
+  }
+
+  for(int i = 0; i < packets; i++){
+    if(write(fd, obuf, strlen(obuf)) != strlen(obuf)){
+      fprintf(2, "txburst: write() failed\n");
+      exit(1);
+    }
+  }
+
+  for(int i = 0; i < packets; i++){
+    char ibuf[128];
+    int cc = read(fd, ibuf, sizeof(ibuf) - 1);
+    if(cc < 0){
+      fprintf(2, "txburst: read() failed\n");
+      exit(1);
+    }
+    ibuf[cc] = 0;
+    if(strcmp(ibuf, "this is the host!") != 0){
+      fprintf(2, "txburst: incorrect reply\n");
+      exit(1);
+    }
+  }
+
+  close(fd);
+}
+
 // Encode a DNS name
 static void
 encode_qname(char *qn, char *host)
@@ -286,6 +326,10 @@ main(int argc, char *argv[])
     if (ret != 0)
       exit(1);
   }
+  printf("OK\n");
+
+  printf("testing TX interrupt refill: ");
+  txburst(3000, dport);
   printf("OK\n");
   
   printf("testing DNS\n");
