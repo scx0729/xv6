@@ -1,0 +1,93 @@
+#!/usr/bin/env python3
+
+import os
+import struct
+import subprocess
+
+from gradelib import *
+
+
+LOCAL_MAC = bytes.fromhex("525400123456")
+GATEWAY_IP = bytes((10, 0, 2, 2))
+UNREACHABLE_IP = bytes((10, 0, 2, 99))
+
+r = Runner(save("xv6.out.arp-cache"))
+
+
+def arp_requests(path):
+    data = open(path, "rb").read()
+    if len(data) < 24:
+        raise AssertionError("packets.pcap is missing or truncated")
+
+    magic = data[:4]
+    if magic == b"\xd4\xc3\xb2\xa1":
+        endian = "<"
+        divisor = 1_000_000.0
+    elif magic == b"\x4d\x3c\xb2\xa1":
+        endian = "<"
+        divisor = 1_000_000_000.0
+    elif magic == b"\xa1\xb2\xc3\xd4":
+        endian = ">"
+        divisor = 1_000_000.0
+    elif magic == b"\xa1\xb2\x3c\x4d":
+        endian = ">"
+        divisor = 1_000_000_000.0
+    else:
+        raise AssertionError("unsupported pcap format")
+
+    requests = []
+    offset = 24
+    while offset + 16 <= len(data):
+        sec, fraction, captured, _ = struct.unpack_from(endian + "IIII", data, offset)
+        offset += 16
+        frame = data[offset:offset + captured]
+        offset += captured
+        if len(frame) < 42 or frame[12:14] != b"\x08\x06":
+            continue
+        arp = frame[14:42]
+        if arp[6:8] != b"\x00\x01" or arp[8:14] != LOCAL_MAC:
+            continue
+        requests.append((sec + fraction / divisor, arp[24:28]))
+    return requests
+
+
+@test(0, "running ARP cache tests")
+def test_run():
+    for path in ("packets.pcap", "kernel/net.o", "kernel/kernel"):
+        maybe_unlink(path)
+    server = subprocess.Popen(
+        ["make", "server"], stdout=subprocess.PIPE, stderr=subprocess.PIPE
+    )
+    try:
+        r.run_qemu(
+            shell_script(["arpcachetest"]),
+            timeout=20,
+            make_args=["ARP_CACHE_TEST=1"],
+        )
+    finally:
+        server.terminate()
+        server.communicate()
+        # Force the next normal build to drop the test-only short TTL.
+        maybe_unlink("kernel/net.o", "kernel/kernel")
+    r.match("^ARP CACHE TEST DONE$")
+
+
+@test(1, "ARP cache expiration", parent=test_run)
+def test_expiration():
+    times = [t for t, target in arp_requests("packets.pcap") if target == GATEWAY_IP]
+    if len(times) < 2:
+        raise AssertionError("missing the post-expiration gateway ARP request")
+    if max(second - first for first, second in zip(times, times[1:])) < 2.5:
+        raise AssertionError("no gateway ARP request was emitted after the test TTL")
+
+
+@test(1, "ARP timeout retries", parent=test_run)
+def test_retries():
+    times = [t for t, target in arp_requests("packets.pcap") if target == UNREACHABLE_IP]
+    assert_equal(len(times), 3, "expected the initial request plus two retries")
+    for first, second in zip(times, times[1:]):
+        if second - first < 0.8:
+            raise AssertionError("ARP retries were emitted without waiting for the retry interval")
+
+
+run_tests()

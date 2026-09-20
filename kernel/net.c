@@ -14,6 +14,66 @@
 static uint32 local_ip = MAKE_IP_ADDR(10, 0, 2, 15); // qemu's idea of the guest IP
 static uint8 local_mac[ETHADDR_LEN] = { 0x52, 0x54, 0x00, 0x12, 0x34, 0x56 };
 static uint8 broadcast_mac[ETHADDR_LEN] = { 0xFF, 0XFF, 0XFF, 0XFF, 0XFF, 0XFF };
+static int net_tx_arp(uint16 op, uint8 dmac[ETHADDR_LEN], uint32 dip);
+static uint64 getticks();
+
+#define ARP_CACHE_SIZE 16
+#define ARP_PENDING_LIMIT 16
+#define ARP_RETRY_TICKS 10
+#define ARP_MAX_RETRIES 3
+#ifdef ARP_CACHE_TEST
+#define ARP_ENTRY_TTL 30
+#else
+#define ARP_ENTRY_TTL 600
+#endif
+enum {
+  ARP_EMPTY,
+  ARP_PENDING,
+  ARP_RESOLVED,
+};
+
+struct arp_entry {
+  int state;
+  uint32 ip;
+  uint8 mac[ETHADDR_LEN];
+
+  struct mbufq pending;
+  int pending_count;
+
+  uint64 last_used;
+  uint64 requested_at;
+  uint64 resolved_at;
+  int retries;
+};
+static struct {
+  struct spinlock lock;
+  struct arp_entry entries[ARP_CACHE_SIZE];
+  uint64 sequence;
+} arpcache;
+
+static struct arp_entry* arp_find_locked(uint32);
+static struct arp_entry* arp_alloc_locked(uint32);
+static int arp_resolve_or_queue(uint32, struct mbuf*, uint8*);
+static int arp_update(uint32, uint8*);
+
+void
+arp_init(void)
+{
+  initlock(&arpcache.lock, "arpcachelock");
+  for(int i = 0;i < ARP_CACHE_SIZE;i++){
+    arpcache.entries[i].state = ARP_EMPTY;
+    mbufq_init(&arpcache.entries[i].pending);
+  }
+}
+
+static uint64
+getticks()
+{
+  acquire(&tickslock);
+  uint now = ticks;
+  release(&tickslock);
+  return now;
+}
 
 // Strips data from the start of the buffer and returns a pointer to it.
 // Returns 0 if less than the full requested length is available.
@@ -161,7 +221,7 @@ in_cksum(const unsigned char *addr, int len)
 
 // sends an ethernet packet
 static void
-net_tx_eth(struct mbuf *m, uint16 ethtype)
+net_tx_eth(struct mbuf *m, uint16 ethtype, uint8 *destination_mac)
 {
   struct eth *ethhdr;
 
@@ -170,7 +230,7 @@ net_tx_eth(struct mbuf *m, uint16 ethtype)
   // In a real networking stack, dhost would be set to the address discovered
   // through ARP. Because we don't support enough of the ARP protocol, set it
   // to broadcast instead.
-  memmove(ethhdr->dhost, broadcast_mac, ETHADDR_LEN);
+  memmove(ethhdr->dhost, destination_mac, ETHADDR_LEN);
   ethhdr->type = htons(ethtype);
   if (e1000_transmit(m)) {
     mbuffree(m);
@@ -195,13 +255,25 @@ net_tx_ip(struct mbuf *m, uint8 proto, uint32 dip)
   iphdr->ip_sum = in_cksum((unsigned char *)iphdr, sizeof(*iphdr));
 
   // now on to the ethernet layer
-  net_tx_eth(m, ETHTYPE_IP);
+  uint32 next_hop;
+  uint32 gateway_ip = MAKE_IP_ADDR(10, 0, 2, 2);
+  if((dip & 0xffffff00) == (local_ip & 0xffffff00))
+    next_hop = dip;
+  else
+    next_hop = gateway_ip;
+  uint8 mac[ETHADDR_LEN];
+  int result = arp_resolve_or_queue(next_hop, m, mac);
+  if(result == 1)
+    net_tx_eth(m, ETHTYPE_IP, mac);
+  else if (result == 2)
+    net_tx_arp(ARP_OP_REQUEST, broadcast_mac, next_hop);
+  else if (result == -1)
+    mbuffree(m);
 }
 
 // sends a UDP packet
 void
-net_tx_udp(struct mbuf *m, uint32 dip,
-           uint16 sport, uint16 dport)
+net_tx_udp(struct mbuf *m, uint32 dip, uint16 sport, uint16 dport)
 {
   struct udp *udphdr;
 
@@ -238,11 +310,19 @@ net_tx_arp(uint16 op, uint8 dmac[ETHADDR_LEN], uint32 dip)
   // ethernet + IP part of ARP header
   memmove(arphdr->sha, local_mac, ETHADDR_LEN);
   arphdr->sip = htonl(local_ip);
-  memmove(arphdr->tha, dmac, ETHADDR_LEN);
   arphdr->tip = htonl(dip);
 
   // header is ready, send the packet
-  net_tx_eth(m, ETHTYPE_ARP);
+  if(op == ARP_OP_REQUEST){
+    memset(arphdr->tha, 0, sizeof(arphdr->tha));
+    net_tx_eth(m, ETHTYPE_ARP, broadcast_mac);
+  } else if(op == ARP_OP_REPLY) {
+    memmove(arphdr->tha, dmac, ETHADDR_LEN);
+    net_tx_eth(m, ETHTYPE_ARP, dmac);
+  } else {
+    mbuffree(m);
+    return -1;
+  }
   return 0;
 }
 
@@ -269,13 +349,15 @@ net_rx_arp(struct mbuf *m)
   // only requests are supported so far
   // check if our IP was solicited
   tip = ntohl(arphdr->tip); // target IP address
-  if (ntohs(arphdr->op) != ARP_OP_REQUEST || tip != local_ip)
+  if ((ntohs(arphdr->op) != ARP_OP_REQUEST && ntohs(arphdr->op) != ARP_OP_REPLY) || tip != local_ip)
     goto done;
 
-  // handle the ARP request
+  // handle the ARP request and reply
   memmove(smac, arphdr->sha, ETHADDR_LEN); // sender's ethernet address
   sip = ntohl(arphdr->sip); // sender's IP address (qemu's slirp)
-  net_tx_arp(ARP_OP_REPLY, smac, sip);
+  arp_update(sip, smac);
+  if(ntohs(arphdr->op) == ARP_OP_REQUEST)
+    net_tx_arp(ARP_OP_REPLY, smac, sip);
 
 done:
   mbuffree(m);
@@ -371,4 +453,178 @@ void net_rx(struct mbuf *m)
     net_rx_arp(m);
   else
     mbuffree(m);
+}
+
+static struct arp_entry*
+arp_find_locked(uint32 ip)
+{
+  struct arp_entry *entry = 0;
+  for(int i = 0;i < ARP_CACHE_SIZE;i++){
+    struct arp_entry* arp = &arpcache.entries[i];
+    if(arp->state != ARP_EMPTY && arp->ip == ip){
+      entry = arp;
+      break;
+    }
+  }
+  return entry;
+}
+
+static struct arp_entry*
+arp_alloc_locked(uint32 ip)
+{
+  struct arp_entry *entry = 0;
+  for(int i = 0;i < ARP_CACHE_SIZE;i++){
+    struct arp_entry* arp = &arpcache.entries[i];
+    if(arp->state == ARP_EMPTY){
+      entry = arp;
+      break;
+    }
+  }
+  if(!entry){
+    for(int i = 0;i < ARP_CACHE_SIZE;i++){
+      struct arp_entry* arp = &arpcache.entries[i];
+      if(arp->state == ARP_RESOLVED && (entry == 0 || arp->last_used < entry->last_used))
+        entry = arp;
+    }
+  }
+  if(entry){
+    entry->state = ARP_PENDING;
+    entry->ip = ip;
+    memset(entry->mac, 0, sizeof(entry->mac));
+    mbufq_init(&entry->pending);
+    entry->pending_count = 0;
+    entry->last_used = ++arpcache.sequence;
+    entry->requested_at = 0;
+    entry->retries = 0;
+    entry->resolved_at = 0;
+  }
+  return entry;
+}
+
+static int
+arp_resolve_or_queue(uint32 ip, struct mbuf *m, uint8 *mac)
+{
+  uint64 now = getticks();
+  acquire(&arpcache.lock);
+  struct arp_entry *arp = arp_find_locked(ip);
+  if(arp != 0){
+    if(arp->state == ARP_RESOLVED){
+      memmove(mac, arp->mac, ETHADDR_LEN);
+      arp->last_used = ++arpcache.sequence;
+      release(&arpcache.lock);
+      return 1;
+    } else if (arp->state == ARP_PENDING){
+      if(arp->pending_count >= ARP_PENDING_LIMIT){
+        release(&arpcache.lock);
+        return -1;
+      }
+      mbufq_pushtail(&arp->pending, m);
+      arp->pending_count++;
+      release(&arpcache.lock);
+      return 0;
+    }
+  }
+  struct arp_entry *entry = arp_alloc_locked(ip);
+  if(entry == 0){
+    release(&arpcache.lock);
+    return -1;
+  }
+  mbufq_pushtail(&entry->pending, m);
+  entry->pending_count++;
+  entry->requested_at = now;
+  entry->retries = 1;
+  release(&arpcache.lock);
+  return 2;
+}
+
+static int
+arp_update(uint32 sip, uint8 *sha)
+{
+  uint64 now = getticks();
+  acquire(&arpcache.lock);
+  struct arp_entry *arp = arp_find_locked(sip);
+  if(arp != 0){
+    if(arp->state == ARP_RESOLVED){
+      memmove(arp->mac, sha, ETHADDR_LEN);
+      arp->last_used = ++arpcache.sequence;
+      arp->requested_at = 0;
+      arp->retries = 0;
+      arp->resolved_at = now;
+      release(&arpcache.lock);
+      return 0;
+    } else if (arp->state == ARP_PENDING){
+      struct mbufq q;
+      uint8 resolved_mac[ETHADDR_LEN];
+      arp->state = ARP_RESOLVED;
+      memmove(arp->mac, sha, ETHADDR_LEN);
+      memmove(resolved_mac, arp->mac, ETHADDR_LEN);
+      arp->last_used = ++arpcache.sequence;
+      q = arp->pending;
+      mbufq_init(&arp->pending);
+      arp->pending_count = 0;
+      arp->requested_at = 0;
+      arp->retries = 0;
+      arp->resolved_at = now;
+      release(&arpcache.lock);
+      while(!mbufq_empty(&q)) {
+        struct mbuf *m = mbufq_pophead(&q);
+        net_tx_eth(m, ETHTYPE_IP, resolved_mac);
+      }
+      return 0;
+    }
+  }
+  struct arp_entry *entry = arp_alloc_locked(sip);
+  if(entry == 0){
+    release(&arpcache.lock);
+    return -1;
+  }
+  memmove(entry->mac, sha, ETHADDR_LEN);
+  entry->state = ARP_RESOLVED;
+  entry->last_used = ++arpcache.sequence;
+  entry->resolved_at = now;
+  release(&arpcache.lock);
+  return 0;
+}
+
+void
+arp_tick(uint64 now)
+{
+  acquire(&arpcache.lock);
+  struct mbufq q[ARP_CACHE_SIZE];
+  uint32 retry_ip[ARP_CACHE_SIZE];
+  int retry_cnt = 0;
+  for(int i = 0;i < ARP_CACHE_SIZE;i++){
+    struct arp_entry *entry = &arpcache.entries[i];
+    mbufq_init(&q[i]);
+    if(entry->state == ARP_PENDING){
+      if(now - entry->requested_at >= ARP_RETRY_TICKS){
+        if(entry->retries >= ARP_MAX_RETRIES){
+          q[i] = entry->pending;
+          mbufq_init(&entry->pending);
+          entry->pending_count = 0;
+          entry->requested_at = 0;
+          entry->retries = 0;
+          entry->state = ARP_EMPTY;
+        } else {
+          entry->retries++;
+          entry->requested_at = now;
+          retry_ip[retry_cnt++] = entry->ip;
+        }
+      }
+    } else if (entry->state == ARP_RESOLVED){
+      if(now - entry->resolved_at >= ARP_ENTRY_TTL){
+        entry->state = ARP_EMPTY;
+        entry->resolved_at = 0;
+      }
+    }
+  }
+  release(&arpcache.lock);
+  for(int i = 0;i < retry_cnt;i++)
+    net_tx_arp(ARP_OP_REQUEST, broadcast_mac, retry_ip[i]);
+  for(int i = 0;i < ARP_CACHE_SIZE;i++){
+    while(!mbufq_empty(&q[i])){
+      struct mbuf *m = mbufq_pophead(&q[i]);
+      mbuffree(m);
+    }
+  }
 }

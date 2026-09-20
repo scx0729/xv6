@@ -166,9 +166,12 @@ void
 clockintr()
 {
   acquire(&tickslock);
-  ticks++;
+  uint now = ++ticks;
   wakeup(&ticks);
   release(&tickslock);
+  #ifdef LAB_NET
+  arp_tick(now);
+  #endif
 }
 
 // check if it's an external interrupt or software interrupt,

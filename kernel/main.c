@@ -32,6 +32,7 @@ main()
     fileinit();      // file table
     virtio_disk_init(); // emulated hard disk
 #ifdef LAB_NET
+    arp_init();
     pci_init();
     sockinit();
 #endif    

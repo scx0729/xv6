@@ -251,7 +251,12 @@ endif
 
 ifeq ($(LAB),net)
 UPROGS += \
-	$U/_nettests
+	$U/_nettests\
+	$U/_arpcachetest
+endif
+
+ifdef ARP_CACHE_TEST
+CFLAGS += -DARP_CACHE_TEST
 endif
 
 UEXTRA=
