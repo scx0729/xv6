@@ -106,6 +106,7 @@ extern uint64 sys_write(void);
 extern uint64 sys_uptime(void);
 #ifdef LAB_NET
 extern uint64 sys_connect(void);
+extern uint64 sys_netqstat(void);
 #endif
 #ifdef LAB_PGTBL
 extern uint64 sys_pgaccess(void);
@@ -135,6 +136,7 @@ static uint64 (*syscalls[])(void) = {
 [SYS_close]   sys_close,
 #ifdef LAB_NET
 [SYS_connect] sys_connect,
+[SYS_netqstat] sys_netqstat,
 #endif
 #ifdef LAB_PGTBL
 [SYS_pgaccess] sys_pgaccess,

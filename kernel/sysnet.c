@@ -13,6 +13,21 @@
 #include "sleeplock.h"
 #include "file.h"
 #include "net.h"
+#include "netqstat.h"
+
+uint64
+sys_netqstat(void)
+{
+  uint64 addr;
+  struct netqstat stats;
+
+  if(argaddr(0, &addr) < 0)
+    return -1;
+  e1000_queue_stats(&stats);
+  if(copyout(myproc()->pagetable, addr, (char *)&stats, sizeof(stats)) < 0)
+    return -1;
+  return 0;
+}
 
 struct sock {
   struct sock *next; // the next socket in the list
