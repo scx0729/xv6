@@ -15,6 +15,14 @@
 #include "net.h"
 #include "netqstat.h"
 
+#define NSOCKHASH 13
+
+static uint32 rcu_readers[NCPU];
+static uint32 hash(uint32, uint16, uint16);
+static void rcu_read_lock();
+static void rcu_read_unlock();
+static void synchronize_rcu();
+
 uint64
 sys_netqstat(void)
 {
@@ -38,13 +46,22 @@ struct sock {
   struct mbufq rxq;  // a queue of packets waiting to be received
 };
 
-static struct spinlock lock;
-static struct sock *sockets;
+struct socket_bucket{
+  struct spinlock lock;
+  struct sock *head;
+};
+
+static struct socket_bucket sockethash[NSOCKHASH];
 
 void
 sockinit(void)
 {
-  initlock(&lock, "socktbl");
+  for(int i = 0;i < NSOCKHASH;i++){
+    initlock(&sockethash[i].lock, "socktbl");
+    sockethash[i].head = 0;
+  }
+  for(int i = 0;i < NCPU;i++)
+    rcu_readers[i] = 0;
 }
 
 int
@@ -65,26 +82,26 @@ sockalloc(struct file **f, uint32 raddr, uint16 lport, uint16 rport)
   si->rport = rport;
   initlock(&si->lock, "sock");
   mbufq_init(&si->rxq);
-  (*f)->type = FD_SOCK;
-  (*f)->readable = 1;
-  (*f)->writable = 1;
-  (*f)->sock = si;
 
   // add to list of sockets
-  acquire(&lock);
-  pos = sockets;
+  uint32 index = hash(raddr, lport, rport);
+  acquire(&sockethash[index].lock);
+  pos = sockethash[index].head;
   while (pos) {
-    if (pos->raddr == raddr &&
-        pos->lport == lport &&
-	pos->rport == rport) {
-      release(&lock);
+    if (pos->raddr == raddr && pos->lport == lport && pos->rport == rport) {
+      release(&sockethash[index].lock);
       goto bad;
     }
     pos = pos->next;
   }
-  si->next = sockets;
-  sockets = si;
-  release(&lock);
+  struct sock *head = __atomic_load_n(&sockethash[index].head, __ATOMIC_ACQUIRE);
+  si->next = head;
+  __atomic_store_n(&sockethash[index].head, si, __ATOMIC_RELEASE);
+  (*f)->type = FD_SOCK;
+  (*f)->readable = 1;
+  (*f)->writable = 1;
+  (*f)->sock = si;
+  release(&sockethash[index].lock);
   return 0;
 
 bad:
@@ -102,16 +119,20 @@ sockclose(struct sock *si)
   struct mbuf *m;
 
   // remove from list of sockets
-  acquire(&lock);
-  pos = &sockets;
+  uint32 index = hash(si->raddr, si->lport, si->rport);
+  acquire(&sockethash[index].lock);
+  pos = &sockethash[index].head;
   while (*pos) {
     if (*pos == si){
-      *pos = si->next;
+      struct sock *next = __atomic_load_n(&si->next, __ATOMIC_ACQUIRE);
+      __atomic_store_n(pos, next, __ATOMIC_RELEASE);
       break;
     }
     pos = &(*pos)->next;
   }
-  release(&lock);
+  release(&sockethash[index].lock);
+
+  synchronize_rcu();
 
   // free any pending mbufs
   while (!mbufq_empty(&si->rxq)) {
@@ -178,17 +199,17 @@ sockrecvudp(struct mbuf *m, uint32 raddr, uint16 lport, uint16 rport)
   // any sleeping reader. Free the mbuf if there are no sockets
   // registered to handle it.
   //
+  rcu_read_lock();
   struct sock *si;
-
-  acquire(&lock);
-  si = sockets;
+  uint32 index = hash(raddr, lport, rport);
+  si = __atomic_load_n(&sockethash[index].head, __ATOMIC_ACQUIRE);
   while (si) {
     if (si->raddr == raddr && si->lport == lport && si->rport == rport)
       goto found;
-    si = si->next;
+    si = __atomic_load_n(&si->next, __ATOMIC_ACQUIRE);
   }
-  release(&lock);
   mbuffree(m);
+  rcu_read_unlock();
   return;
 
 found:
@@ -196,5 +217,44 @@ found:
   mbufq_pushtail(&si->rxq, m);
   wakeup(&si->rxq);
   release(&si->lock);
-  release(&lock);
+  rcu_read_unlock();
+}
+
+static uint32
+hash(uint32 raddr, uint16 lport, uint16 rport)
+{
+  uint32 h;
+
+  h = raddr;
+  h = h * 31 + lport;
+  h = h * 31 + rport;
+
+  return h % NSOCKHASH;
+}
+
+static void
+rcu_read_lock()
+{
+  push_off();
+  int cid = cpuid();
+  __sync_fetch_and_add(&rcu_readers[cid], 1);
+  __sync_synchronize();
+}
+
+static void
+rcu_read_unlock()
+{
+  __sync_synchronize();
+  int cid = cpuid();
+  __sync_fetch_and_sub(&rcu_readers[cid], 1);
+  pop_off();
+}
+
+static void
+synchronize_rcu()
+{
+  for(int i = 0;i < NCPU;i++){
+    while(__atomic_load_n(&rcu_readers[i], __ATOMIC_ACQUIRE) > 0)
+      yield();
+  }
 }
