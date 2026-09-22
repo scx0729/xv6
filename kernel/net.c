@@ -398,6 +398,49 @@ fail:
   mbuffree(m);
 }
 
+static void
+net_rx_icmp(struct mbuf *m, uint16 len)
+{
+  mbuftrim(m, m->len - len);
+  if(in_cksum((unsigned char*)m->head, len) != 0)
+    goto done;
+  struct icmp *icmp = mbufpullhdr(m, *icmp);
+  if(icmp == 0)
+    goto done;
+  if(icmp->type != ICMP_DEST_UNREACH || icmp->code != ICMP_PORT_UNREACH)
+    goto done;
+  if(m->len < sizeof(struct ip))
+    goto done;
+  struct ip *inner_ip = (struct ip*)m->head;
+  int version = inner_ip->ip_vhl >> 4;
+  int ip_header_len = (inner_ip->ip_vhl & 0x0f) * 4;
+  if(ntohl(inner_ip->ip_src) != local_ip)
+    goto done;
+  if(version != 4 || ip_header_len < sizeof(struct ip))
+    goto done;
+  if(inner_ip->ip_p != IPPROTO_UDP)
+    goto done;
+  uint32 raddr = ntohl(inner_ip->ip_dst);
+  if(ip_header_len > m->len)
+    goto done;
+  if(in_cksum((unsigned char*)m->head, ip_header_len) != 0)
+    goto done;
+  if(mbufpull(m, ip_header_len) == 0)
+    goto done;
+  if(m->len < sizeof(struct udp))
+    goto done;
+  struct udp *udp = mbufpullhdr(m, *udp);
+  if(udp == 0)
+    goto done;
+  uint16 lport = ntohs(udp->sport);
+  uint16 rport = ntohs(udp->dport);
+  if(sockrecverr(raddr, lport, rport, icmp->type, icmp->code) < 0)
+    goto done;
+
+done:
+  mbuffree(m);
+}
+
 // receives an IP packet
 static void
 net_rx_ip(struct mbuf *m)
@@ -421,12 +464,20 @@ net_rx_ip(struct mbuf *m)
   // is the packet addressed to us?
   if (htonl(iphdr->ip_dst) != local_ip)
     goto fail;
-  // can only support UDP
-  if (iphdr->ip_p != IPPROTO_UDP)
+  // can only support UDP and ICMP
+  uint16 total_len = ntohs(iphdr->ip_len);
+  if(total_len < sizeof(*iphdr))
     goto fail;
-
-  len = ntohs(iphdr->ip_len) - sizeof(*iphdr);
-  net_rx_udp(m, len, iphdr);
+  if(total_len - sizeof(*iphdr) > m->len)
+    goto fail;
+  len = total_len - sizeof(*iphdr);
+  if (iphdr->ip_p == IPPROTO_UDP){
+    net_rx_udp(m, len, iphdr);
+  } else if (iphdr->ip_p == IPPROTO_ICMP) {
+    net_rx_icmp(m, len);
+  } else {
+    goto fail;
+  }
   return;
 
 fail:

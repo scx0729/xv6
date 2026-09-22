@@ -238,4 +238,5 @@ void            sockclose(struct sock *);
 int             sockread(struct sock *, uint64, int);
 int             sockwrite(struct sock *, uint64, int);
 void            sockrecvudp(struct mbuf*, uint32, uint16, uint16);
+int             sockrecverr(uint32, uint16, uint16, uint8, uint8);
 #endif

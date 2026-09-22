@@ -1,0 +1,38 @@
+#!/usr/bin/env python3
+
+import os
+import socket
+import subprocess
+
+from gradelib import *
+
+
+r = Runner(save("xv6.out.icmp"))
+
+
+@test(1, "ICMP port unreachable")
+def test_icmp_port_unreachable():
+    echo_port = os.getuid() % 5000 + 25099
+    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        probe.bind(("127.0.0.1", echo_port + 1))
+    except OSError as exc:
+        raise AssertionError(
+            "test UDP port %d is already in use: %s" % (echo_port + 1, exc)
+        )
+    finally:
+        probe.close()
+
+    server = subprocess.Popen(
+        ["make", "server"], stdout=subprocess.PIPE, stderr=subprocess.PIPE
+    )
+    try:
+        r.run_qemu(shell_script(["icmptest"]), timeout=15)
+    finally:
+        server.terminate()
+        server.communicate()
+
+    r.match("^ICMP PORT UNREACHABLE TEST PASSED$")
+
+
+run_tests()

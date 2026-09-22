@@ -44,6 +44,7 @@ struct sock {
   uint16 rport;      // the remote UDP port number
   struct spinlock lock; // protects the rxq
   struct mbufq rxq;  // a queue of packets waiting to be received
+  int error;
 };
 
 struct socket_bucket{
@@ -80,6 +81,7 @@ sockalloc(struct file **f, uint32 raddr, uint16 lport, uint16 rport)
   si->raddr = raddr;
   si->lport = lport;
   si->rport = rport;
+  si->error = 0;
   initlock(&si->lock, "sock");
   mbufq_init(&si->rxq);
 
@@ -151,10 +153,15 @@ sockread(struct sock *si, uint64 addr, int n)
   int len;
 
   acquire(&si->lock);
-  while (mbufq_empty(&si->rxq) && !pr->killed) {
+  while (mbufq_empty(&si->rxq) && !pr->killed && !si->error) {
     sleep(&si->rxq, &si->lock);
   }
   if (pr->killed) {
+    release(&si->lock);
+    return -1;
+  }
+  if(mbufq_empty(&si->rxq) && si->error){
+    si->error = 0;
     release(&si->lock);
     return -1;
   }
@@ -257,4 +264,28 @@ synchronize_rcu()
     while(__atomic_load_n(&rcu_readers[i], __ATOMIC_ACQUIRE) > 0)
       yield();
   }
+}
+
+int
+sockrecverr(uint32 raddr, uint16 lport, uint16 rport, uint8 type, uint8 code)
+{
+  rcu_read_lock();
+  struct sock *si;
+  uint32 index = hash(raddr, lport, rport);
+  si = __atomic_load_n(&sockethash[index].head, __ATOMIC_ACQUIRE);
+  while (si) {
+    if (si->raddr == raddr && si->lport == lport && si->rport == rport)
+      goto found;
+    si = __atomic_load_n(&si->next, __ATOMIC_ACQUIRE);
+  }
+  rcu_read_unlock();
+  return -1;
+
+found:
+  acquire(&si->lock);
+  si->error = ((int)type << 8) | code;
+  wakeup(&si->rxq);
+  release(&si->lock);
+  rcu_read_unlock();
+  return 0;
 }

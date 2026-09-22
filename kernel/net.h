@@ -103,6 +103,9 @@ struct ip {
 #define IPPROTO_TCP  6  // Transmission control protocol
 #define IPPROTO_UDP  17 // User datagram protocol
 
+#define ICMP_DEST_UNREACH 3
+#define ICMP_PORT_UNREACH 3
+
 #define MAKE_IP_ADDR(a, b, c, d)           \
   (((uint32)a << 24) | ((uint32)b << 16) | \
    ((uint32)c << 8) | (uint32)d)
@@ -114,6 +117,13 @@ struct udp {
   uint16 ulen;  // length, including udp header, not including IP header
   uint16 sum;   // checksum
 };
+
+struct icmp {
+  uint8  type;
+  uint8  code;
+  uint16 checksum;
+  uint32 rest;
+}__attribute__((packed));
 
 // an ARP packet (comes after an Ethernet header).
 struct arp {

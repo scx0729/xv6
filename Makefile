@@ -253,6 +253,7 @@ ifeq ($(LAB),net)
 UPROGS += \
 	$U/_nettests\
 	$U/_arpcachetest\
+	$U/_icmptest\
 	$U/_netqtest\
 	$U/_sockhashtest
 endif
