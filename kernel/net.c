@@ -9,6 +9,7 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "net.h"
+#include "e1000_dev.h"
 #include "defs.h"
 
 static uint32 local_ip = MAKE_IP_ADDR(10, 0, 2, 15); // qemu's idea of the guest IP
@@ -135,6 +136,11 @@ mbufalloc(unsigned int headroom)
   m->next = 0;
   m->head = (char *)m->buf + headroom;
   m->len = 0;
+  m->rx_status = 0;
+  m->rx_errors = 0;
+  // m->tx_csum = 0;
+  // m->tx_css = 0;
+  // m->tx_cso = 0;
   memset(m->buf, 0, sizeof(m->buf));
   return m;
 }
@@ -271,6 +277,22 @@ net_tx_ip(struct mbuf *m, uint8 proto, uint32 dip)
     mbuffree(m);
 }
 
+// 计算 UDP 伪首部的部分和
+// static uint16
+// udp_pseudo_sum(uint32 src, uint32 dst, uint16 len)
+// {
+//   uint32 sum = 0;
+//   sum += src >> 16;
+//   sum += src & 0xffff;
+//   sum += dst >> 16;
+//   sum += dst & 0xffff;
+//   sum += 17;
+//   sum += len;
+//   while(sum >> 16)
+//     sum = (sum & 0xffff) + (sum >> 16);
+//   return htons((uint16)sum);
+// }
+
 // sends a UDP packet
 void
 net_tx_udp(struct mbuf *m, uint32 dip, uint16 sport, uint16 dport)
@@ -282,8 +304,11 @@ net_tx_udp(struct mbuf *m, uint32 dip, uint16 sport, uint16 dport)
   udphdr->sport = htons(sport);
   udphdr->dport = htons(dport);
   udphdr->ulen = htons(m->len);
-  udphdr->sum = 0; // zero means no checksum is provided
-
+  // m->tx_csum = 1;
+  // m->tx_css = sizeof(struct eth) + sizeof(struct ip);
+  // m->tx_cso = m->tx_css + __builtin_offsetof(struct udp, sum);
+  // udphdr->sum = udp_pseudo_sum(local_ip, dip, m->len);
+  udphdr->sum = 0;
   // now on to the IP layer
   net_tx_ip(m, IPPROTO_UDP, dip);
 }
@@ -456,8 +481,13 @@ net_rx_ip(struct mbuf *m)
   if (iphdr->ip_vhl != ((4 << 4) | (20 >> 2)))
     goto fail;
   // validate IP checksum
-  if (in_cksum((unsigned char *)iphdr, sizeof(*iphdr)))
-    goto fail;
+  if (!(m->rx_status & E1000_RXD_STAT_IXSM) && (m->rx_status & E1000_RXD_STAT_IPCS)){
+    if (m->rx_errors & E1000_RXD_ERR_IPE)
+      goto fail;
+  } else {
+    if (in_cksum((unsigned char *)iphdr, sizeof(*iphdr)))
+      goto fail;
+  }
   // can't support fragmented IP packets
   if (htons(iphdr->ip_off) != 0)
     goto fail;

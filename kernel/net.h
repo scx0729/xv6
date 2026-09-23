@@ -10,6 +10,11 @@ struct mbuf {
   char         *head; // the current start position of the buffer
   unsigned int len;   // the length of the buffer
   char         buf[MBUF_SIZE]; // the backing store
+  uint8        rx_status;
+  uint8        rx_errors;
+  // uint8        tx_csum; // whether hardware should insert a checksum
+  // uint8        tx_css;  // checksum start offset
+  // uint8        tx_cso;  // checksum destination offset
 };
 
 char *mbufpull(struct mbuf *m, unsigned int len);

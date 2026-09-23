@@ -23,6 +23,7 @@
 #define E1000_TDT      (0x03818/4)  /* TX Descripotr Tail - RW */
 #define E1000_MTA      (0x05200/4)  /* Multicast Table Array - RW Array */
 #define E1000_RA       (0x05400/4)  /* Receive Address - RW Array */
+#define E1000_RXCSUM   (0x05000/4)  /* RX Checksum Control - RW */
 
 /* Interrupt Cause Read / Interrupt Mask Set bits */
 #define E1000_ICR_TXDW 0x00000001  /* Transmit Descriptor Written Back */
@@ -95,6 +96,7 @@
 
 /* Transmit Descriptor command definitions [E1000 3.3.3.1] */
 #define E1000_TXD_CMD_EOP    0x01 /* End of Packet */
+#define E1000_TXD_CMD_IC     0x04 /* Insert Checksum */
 #define E1000_TXD_CMD_RS     0x08 /* Report Status */
 
 /* Transmit Descriptor status definitions [E1000 3.3.3.2] */
@@ -115,6 +117,12 @@ struct tx_desc
 /* Receive Descriptor bit definitions [E1000 3.2.3.1] */
 #define E1000_RXD_STAT_DD       0x01    /* Descriptor Done */
 #define E1000_RXD_STAT_EOP      0x02    /* End of Packet */
+#define E1000_RXD_STAT_IXSM     0x04    /* Ignore Checksum Indication */
+#define E1000_RXD_STAT_IPCS     0x40    /* IP Checksum Calculated */
+#define E1000_RXD_ERR_IPE       0x40    /* IP Checksum Error */
+
+/* Receive Checksum Control */
+#define E1000_RXCSUM_IPOFL      0x00000100 /* IPv4 Checksum Offload */
 
 // [E1000 3.2.3]
 struct rx_desc
@@ -126,4 +134,3 @@ struct rx_desc
   uint8 errors;      /* Descriptor Errors */
   uint16 special;
 };
-

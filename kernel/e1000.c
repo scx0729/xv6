@@ -78,6 +78,7 @@ e1000_init(uint32 *xregs)
   regs[E1000_IMS] = 0; // disable interrupts
   regs[E1000_CTL] |= E1000_CTL_RST;
   regs[E1000_IMS] = 0; // redisable interrupts
+  regs[E1000_RXCSUM] |= E1000_RXCSUM_IPOFL;
   __sync_synchronize();
 
   // [E1000 14.5] Transmit initialization
@@ -164,6 +165,8 @@ e1000_recv(void)
     struct mbuf *m = rx_mbufs[index];
     // m->head = (char*)rx_ring[index].addr;
     m->len = rx_ring[index].length;
+    m->rx_status = rx_ring[index].status;
+    m->rx_errors = rx_ring[index].errors;
     struct mbuf *new_m = mbufalloc(0);
     if(new_m == 0)
       panic("e1000");
@@ -239,7 +242,14 @@ tx_fill()
     }
     tx_ring[index].addr = (uint64)m->head;
     tx_ring[index].length = m->len;
+    // tx_ring[index].cso = 0;
+    // tx_ring[index].css = 0;
     tx_ring[index].cmd = E1000_TXD_CMD_RS | E1000_TXD_CMD_EOP;
+    // if(m->tx_csum){
+    //   tx_ring[index].css = m->tx_css;
+    //   tx_ring[index].cso = m->tx_cso;
+    //   tx_ring[index].cmd |= E1000_TXD_CMD_IC;
+    // }
     tx_ring[index].status = 0;
     tx_mbufs[index] = m;
     tx_queued[qid]--;
@@ -248,6 +258,7 @@ tx_fill()
     release(&txq_lock[qid]);
     tx_inflight++;
     count = 0;
+    __sync_synchronize();
     regs[E1000_TDT] = (index + 1) % TX_RING_SIZE;
   }
 }
