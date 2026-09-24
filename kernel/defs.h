@@ -224,6 +224,7 @@ void            e1000_init(uint32 *);
 void            e1000_intr(void);
 int             e1000_transmit(struct mbuf*);
 void            e1000_queue_stats(struct netqstat*);
+void            e1000_poll(void);
 
 // net.c
 void            net_rx(struct mbuf*);

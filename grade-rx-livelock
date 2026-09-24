@@ -1,0 +1,31 @@
+#!/usr/bin/env python3
+
+import subprocess
+
+from gradelib import *
+
+
+r = Runner(save("xv6.out.rx-livelock"))
+
+
+@test(1, "RX receive livelock")
+def test_rx_receive_livelock():
+    server = subprocess.Popen(
+        ["make", "livelock-server"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        r.run_qemu(
+            shell_script(["rxlivelocktest"]),
+            timeout=15,
+            make_args=["CPUS=1"],
+        )
+    finally:
+        server.terminate()
+        server.communicate()
+
+    r.match(r"^RX LIVELOCK TEST PASSED \([0-9]+ packets\)$")
+
+
+run_tests()

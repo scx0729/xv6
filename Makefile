@@ -255,6 +255,7 @@ UPROGS += \
 	$U/_arpcachetest\
 	$U/_icmptest\
 	$U/_netqtest\
+	$U/_rxlivelocktest\
 	$U/_sockhashtest
 endif
 
@@ -322,6 +323,9 @@ SERVERPORT = $(shell expr `id -u` % 5000 + 25099)
 
 server:
 	python3 server.py $(SERVERPORT)
+
+livelock-server:
+	python3 rx_livelock_server.py $(SERVERPORT)
 
 ping:
 	python3 ping.py $(FWDPORT)

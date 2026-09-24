@@ -44,7 +44,10 @@ static int next_txq;
 static void tx_reclaim();
 static void tx_fill();
 static void rx_enqueue(int, struct mbuf*);
-static void e1000_rx_poll();
+
+#define RX_POLL_BUDGET 8
+static int e1000_rx_poll(int budget);
+static int rx_polling;
 
 // called by pci_init().
 // xregs is the memory address at which the
@@ -69,15 +72,16 @@ e1000_init(uint32 *xregs)
     rx_dequeued[i] = 0;
     rx_dropped[i] = 0;
   }
+  rx_polling = 0;
   initlock(&tx_hw_lock, "e1000_tx_hw");
   initlock(&rx_hw_lock, "e1000_rx_hw");
 
   regs = xregs;
 
   // Reset the device
-  regs[E1000_IMS] = 0; // disable interrupts
+  regs[E1000_IMC] = 0xffffffff; // disable interrupts
   regs[E1000_CTL] |= E1000_CTL_RST;
-  regs[E1000_IMS] = 0; // redisable interrupts
+  regs[E1000_IMC] = 0xffffffff; // redisable interrupts
   regs[E1000_RXCSUM] |= E1000_RXCSUM_IPOFL;
   __sync_synchronize();
 
@@ -156,12 +160,13 @@ e1000_transmit(struct mbuf *m)
   return 0;
 }
 
-static void
-e1000_recv(void)
+static int
+e1000_recv(int budget)
 {
   int qid = cpuid() % NRXQ;
   uint32 index = (regs[E1000_RDT] + 1) % RX_RING_SIZE;
-  while((rx_ring[index].status & E1000_RXD_STAT_DD) != 0){
+  int processed = 0;
+  while((processed < budget) && (rx_ring[index].status & E1000_RXD_STAT_DD)){
     struct mbuf *m = rx_mbufs[index];
     // m->head = (char*)rx_ring[index].addr;
     m->len = rx_ring[index].length;
@@ -177,7 +182,9 @@ e1000_recv(void)
     regs[E1000_RDT] = index;
     index = (index + 1) % RX_RING_SIZE;
     rx_enqueue(qid, m);
+    processed++;
   }
+  return processed;
 }
 
 void
@@ -196,9 +203,12 @@ e1000_intr(void)
 
   if(icr & E1000_ICR_RXT0){
     acquire(&rx_hw_lock);
-    e1000_recv();
+    if(!rx_polling){
+      rx_polling = 1;
+      regs[E1000_IMC] = E1000_ICR_RXT0;
+    }
     release(&rx_hw_lock);
-    e1000_rx_poll();
+    e1000_poll();
   }
 }
 
@@ -279,12 +289,13 @@ rx_enqueue(int qid, struct mbuf *m)
   release(&rxq_lock[qid]);
 }
 
-static void
-e1000_rx_poll()
+static int
+e1000_rx_poll(int budget)
 {
   push_off();
   int qid = cpuid() % NRXQ;
-  for(;;){
+  int processed = 0;
+  while(processed < budget){
     acquire(&rxq_lock[qid]);
     if(mbufq_empty(&rxq[qid])){
       release(&rxq_lock[qid]);
@@ -299,8 +310,10 @@ e1000_rx_poll()
     rx_dequeued[qid]++;
     release(&rxq_lock[qid]);
     net_rx(m);
+    processed++;
   }
   pop_off();
+  return processed;
 }
 
 void
@@ -322,4 +335,44 @@ e1000_queue_stats(struct netqstat *stats)
     stats->rx_queued[i] = rx_queued[i];
     release(&rxq_lock[i]);
   }
+}
+
+static int
+rx_work_pending_locked(void)
+{
+  uint32 index = (regs[E1000_RDT] + 1) % RX_RING_SIZE;
+  if(rx_ring[index].status & E1000_RXD_STAT_DD)
+    return 1;
+  for(int i = 0;i < NRXQ;i++){
+    acquire(&rxq_lock[i]);
+    int nonempty = !mbufq_empty(&rxq[i]);
+    release(&rxq_lock[i]);
+    if(nonempty)
+      return 1;
+  }
+  return 0;
+}
+
+void
+e1000_poll(void)
+{
+  acquire(&rx_hw_lock);
+  if(!rx_polling){
+    release(&rx_hw_lock);
+    return;
+  }
+  e1000_recv(RX_POLL_BUDGET);
+  release(&rx_hw_lock);
+  e1000_rx_poll(RX_POLL_BUDGET);
+  acquire(&rx_hw_lock);
+  if(!rx_work_pending_locked()){
+    rx_polling = 0;
+    regs[E1000_IMS] = E1000_ICR_RXT0;
+    __sync_synchronize();
+    if(rx_work_pending_locked()){
+      rx_polling = 1;
+      regs[E1000_IMC] = E1000_ICR_RXT0;
+    }
+  }
+  release(&rx_hw_lock);
 }
