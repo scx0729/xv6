@@ -39,3 +39,6 @@ entry("uptime");
 entry("connect");
 entry("netqstat");
 entry("pgaccess");
+entry("bind");
+entry("recvfrom");
+entry("sendto");

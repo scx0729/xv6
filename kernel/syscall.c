@@ -107,6 +107,9 @@ extern uint64 sys_uptime(void);
 #ifdef LAB_NET
 extern uint64 sys_connect(void);
 extern uint64 sys_netqstat(void);
+extern uint64 sys_bind(void);
+extern uint64 sys_recvfrom(void);
+extern uint64 sys_sendto(void);
 #endif
 #ifdef LAB_PGTBL
 extern uint64 sys_pgaccess(void);
@@ -137,6 +140,9 @@ static uint64 (*syscalls[])(void) = {
 #ifdef LAB_NET
 [SYS_connect] sys_connect,
 [SYS_netqstat] sys_netqstat,
+[SYS_bind]    sys_bind,
+[SYS_recvfrom] sys_recvfrom,
+[SYS_sendto]  sys_sendto,
 #endif
 #ifdef LAB_PGTBL
 [SYS_pgaccess] sys_pgaccess,

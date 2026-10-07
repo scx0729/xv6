@@ -256,7 +256,8 @@ UPROGS += \
 	$U/_icmptest\
 	$U/_netqtest\
 	$U/_rxlivelocktest\
-	$U/_sockhashtest
+	$U/_sockhashtest\
+	$U/_udpservertest
 endif
 
 ifdef ARP_CACHE_TEST
@@ -326,6 +327,9 @@ server:
 
 livelock-server:
 	python3 rx_livelock_server.py $(SERVERPORT)
+
+udp-server-client:
+	python3 udp_server_client.py $(FWDPORT)
 
 ping:
 	python3 ping.py $(FWDPORT)

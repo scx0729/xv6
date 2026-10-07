@@ -396,7 +396,6 @@ net_rx_udp(struct mbuf *m, uint16 len, struct ip *iphdr)
   uint32 sip;
   uint16 sport, dport;
 
-
   udphdr = mbufpullhdr(m, *udphdr);
   if (!udphdr)
     goto fail;
@@ -416,6 +415,8 @@ net_rx_udp(struct mbuf *m, uint16 len, struct ip *iphdr)
   sip = ntohl(iphdr->ip_src);
   sport = ntohs(udphdr->sport);
   dport = ntohs(udphdr->dport);
+  m->src_ip = sip;
+  m->src_port = sport;
   sockrecvudp(m, sip, dport, sport);
   return;
 

@@ -12,6 +12,8 @@ struct mbuf {
   char         buf[MBUF_SIZE]; // the backing store
   uint8        rx_status;
   uint8        rx_errors;
+  uint32       src_ip;
+  uint16       src_port;
   // uint8        tx_csum; // whether hardware should insert a checksum
   // uint8        tx_css;  // checksum start offset
   // uint8        tx_cso;  // checksum destination offset

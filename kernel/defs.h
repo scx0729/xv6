@@ -240,4 +240,7 @@ int             sockread(struct sock *, uint64, int);
 int             sockwrite(struct sock *, uint64, int);
 void            sockrecvudp(struct mbuf*, uint32, uint16, uint16);
 int             sockrecverr(uint32, uint16, uint16, uint8, uint8);
+int             sockbind(struct file **, uint16);
+int             sockrecvfrom(struct sock *, uint64, int, uint64, uint64);
+int             socksendto(struct sock *, uint64, int, uint32, uint16);
 #endif

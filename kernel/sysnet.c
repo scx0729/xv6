@@ -45,6 +45,7 @@ struct sock {
   struct spinlock lock; // protects the rxq
   struct mbufq rxq;  // a queue of packets waiting to be received
   int error;
+  int connected;
 };
 
 struct socket_bucket{
@@ -82,6 +83,7 @@ sockalloc(struct file **f, uint32 raddr, uint16 lport, uint16 rport)
   si->lport = lport;
   si->rport = rport;
   si->error = 0;
+  si->connected = 1;
   initlock(&si->lock, "sock");
   mbufq_init(&si->rxq);
 
@@ -91,6 +93,56 @@ sockalloc(struct file **f, uint32 raddr, uint16 lport, uint16 rport)
   pos = sockethash[index].head;
   while (pos) {
     if (pos->raddr == raddr && pos->lport == lport && pos->rport == rport) {
+      release(&sockethash[index].lock);
+      goto bad;
+    }
+    pos = pos->next;
+  }
+  struct sock *head = __atomic_load_n(&sockethash[index].head, __ATOMIC_ACQUIRE);
+  si->next = head;
+  __atomic_store_n(&sockethash[index].head, si, __ATOMIC_RELEASE);
+  (*f)->type = FD_SOCK;
+  (*f)->readable = 1;
+  (*f)->writable = 1;
+  (*f)->sock = si;
+  release(&sockethash[index].lock);
+  return 0;
+
+bad:
+  if (si)
+    kfree((char*)si);
+  if (*f)
+    fileclose(*f);
+  return -1;
+}
+
+int
+sockbind(struct file **f, uint16 lport)
+{
+  struct sock *si, *pos;
+
+  si = 0;
+  *f = 0;
+  if ((*f = filealloc()) == 0)
+    goto bad;
+  if ((si = (struct sock*)kalloc()) == 0)
+    goto bad;
+
+  // initialize objects
+  si->raddr = 0;
+  si->lport = lport;
+  si->rport = 0;
+  si->error = 0;
+  si->connected = 0;
+  initlock(&si->lock, "sock");
+  mbufq_init(&si->rxq);
+
+  // add to list of sockets
+  uint32 index = hash(0, lport, 0);
+  acquire(&sockethash[index].lock);
+  pos = sockethash[index].head;
+  while (pos) {
+    if (pos->raddr == 0 && pos->lport == lport && pos->rport == 0) {
       release(&sockethash[index].lock);
       goto bad;
     }
@@ -152,6 +204,8 @@ sockread(struct sock *si, uint64 addr, int n)
   struct mbuf *m;
   int len;
 
+  if(!si->connected)
+    return -1;
   acquire(&si->lock);
   while (mbufq_empty(&si->rxq) && !pr->killed && !si->error) {
     sleep(&si->rxq, &si->lock);
@@ -185,6 +239,10 @@ sockwrite(struct sock *si, uint64 addr, int n)
   struct proc *pr = myproc();
   struct mbuf *m;
 
+  if(!si->connected)
+    return -1;
+  if(n < 0 || n > MBUF_SIZE - MBUF_DEFAULT_HEADROOM)
+    return -1;
   m = mbufalloc(MBUF_DEFAULT_HEADROOM);
   if (!m)
     return -1;
@@ -211,7 +269,14 @@ sockrecvudp(struct mbuf *m, uint32 raddr, uint16 lport, uint16 rport)
   uint32 index = hash(raddr, lport, rport);
   si = __atomic_load_n(&sockethash[index].head, __ATOMIC_ACQUIRE);
   while (si) {
-    if (si->raddr == raddr && si->lport == lport && si->rport == rport)
+    if (si->connected && si->raddr == raddr && si->lport == lport && si->rport == rport)
+      goto found;
+    si = __atomic_load_n(&si->next, __ATOMIC_ACQUIRE);
+  }
+  index = hash(0, lport, 0);
+  si = __atomic_load_n(&sockethash[index].head, __ATOMIC_ACQUIRE);
+  while (si) {
+    if (!si->connected && si->raddr == 0 && si->lport == lport && si->rport == 0)
       goto found;
     si = __atomic_load_n(&si->next, __ATOMIC_ACQUIRE);
   }
@@ -288,4 +353,67 @@ found:
   release(&si->lock);
   rcu_read_unlock();
   return 0;
+}
+
+int
+sockrecvfrom(struct sock *si, uint64 buf_addr, int len, uint64 src_ip_addr, uint64 src_port_addr)
+{
+  struct mbuf *m;
+  struct proc *p = myproc();
+  if(si->connected)
+    return -1;
+  acquire(&si->lock);
+  while (mbufq_empty(&si->rxq) && !p->killed && !si->error) {
+    sleep(&si->rxq, &si->lock);
+  }
+  if(p->killed) {
+    release(&si->lock);
+    return -1;
+  }
+  if(mbufq_empty(&si->rxq) && si->error){
+    si->error = 0;
+    release(&si->lock);
+    return -1;
+  }
+  m = mbufq_pophead(&si->rxq);
+  release(&si->lock);
+
+  if(copyout(p->pagetable, src_ip_addr, (char*)&m->src_ip, sizeof(m->src_ip)) == -1) {
+    mbuffree(m);
+    return -1;
+  }
+  if(copyout(p->pagetable, src_port_addr, (char*)&m->src_port, sizeof(m->src_port)) == -1) {
+    mbuffree(m);
+    return -1;
+  }
+  int n = m->len;
+  if(n > len)
+    n = len;
+  if(copyout(p->pagetable, buf_addr, m->head, n) < 0) {
+    mbuffree(m);
+    return -1;
+  }
+  mbuffree(m);
+  return n;
+}
+
+int
+socksendto(struct sock *si, uint64 buf_addr, int len, uint32 dst_ip, uint16 dst_port)
+{
+  struct proc *p = myproc();
+  struct mbuf *m;
+  if(si->connected)
+    return -1;
+  if(len < 0 || len > MBUF_SIZE - MBUF_DEFAULT_HEADROOM)
+    return -1;
+  m = mbufalloc(MBUF_DEFAULT_HEADROOM);
+  if(!m)
+    return -1;
+
+  if(copyin(p->pagetable, mbufput(m, len), buf_addr, len) == -1) {
+    mbuffree(m);
+    return -1;
+  }
+  net_tx_udp(m, dst_ip, si->lport, dst_port);
+  return len;
 }

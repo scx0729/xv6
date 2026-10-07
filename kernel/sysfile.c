@@ -487,7 +487,7 @@ sys_pipe(void)
 
 
 #ifdef LAB_NET
-int
+uint64
 sys_connect(void)
 {
   struct file *f;
@@ -510,5 +510,60 @@ sys_connect(void)
   }
 
   return fd;
+}
+
+uint64 
+sys_bind(void)
+{
+  struct file *f;
+  int lport;
+  int fd;
+  if(argint(0, &lport) < 0 || lport < 0 || lport > 65535)
+    return -1;
+  if(sockbind(&f, lport) < 0)
+    return -1;
+  if((fd=fdalloc(f)) < 0){
+    fileclose(f);
+    return -1;
+  }
+  return fd;
+}
+
+uint64
+sys_recvfrom(void)
+{
+  struct file *f;
+  uint64 buf_addr;
+  uint64 src_ip_addr;
+  uint64 src_port_addr;
+  int len;
+  if (argfd(0, 0, &f) < 0 || argaddr(1, &buf_addr) < 0 || argint(2, &len) < 0 || argaddr(3, &src_ip_addr) < 0 || argaddr(4, &src_port_addr) < 0){
+    return -1;
+  }
+  if(f->type != FD_SOCK)
+    return -1;
+  if(len < 0)
+    return -1;
+  return sockrecvfrom(f->sock, buf_addr, len, src_ip_addr, src_port_addr);
+}
+
+uint64
+sys_sendto(void)
+{
+  struct file *f;
+  uint64 buf_addr;
+  int dst_ip;
+  int dst_port;
+  int len;
+  if (argfd(0, 0, &f) < 0 || argaddr(1, &buf_addr) < 0 || argint(2, &len) < 0 || argint(3, &dst_ip) < 0 || argint(4, &dst_port) < 0){
+    return -1;
+  }
+  if(f->type != FD_SOCK)
+    return -1;
+  if(len < 0)
+    return -1;
+  if(dst_port < 0 || dst_port > 65535)
+    return -1;
+  return socksendto(f->sock, buf_addr, len, dst_ip, dst_port);
 }
 #endif
