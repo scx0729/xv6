@@ -125,6 +125,24 @@ struct udp {
   uint16 sum;   // checksum
 };
 
+#define TCP_FIN 0x01
+#define TCP_SYN 0x02
+#define TCP_RST 0x04
+#define TCP_PSH 0x08
+#define TCP_ACK 0x10
+
+struct tcp {
+  uint16 sport;
+  uint16 dport;
+  uint32 seq;
+  uint32 ack;
+  uint8  offset;
+  uint8  flags;
+  uint16 window;
+  uint16 checksum;
+  uint16 urgent;
+}__attribute__((packed));
+
 struct icmp {
   uint8  type;
   uint8  code;

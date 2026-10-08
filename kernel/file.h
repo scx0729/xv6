@@ -1,6 +1,6 @@
 struct file {
 #ifdef LAB_NET
-  enum { FD_NONE, FD_PIPE, FD_INODE, FD_DEVICE, FD_SOCK } type;
+  enum { FD_NONE, FD_PIPE, FD_INODE, FD_DEVICE, FD_SOCK, FD_TCP } type;
 #else
   enum { FD_NONE, FD_PIPE, FD_INODE, FD_DEVICE } type;
 #endif
@@ -11,6 +11,7 @@ struct file {
   struct inode *ip;  // FD_INODE and FD_DEVICE
 #ifdef LAB_NET
   struct sock *sock; // FD_SOCK
+  struct tcp_sock *tcp; // FD_TCP
 #endif
   uint off;          // FD_INODE
   short major;       // FD_DEVICE

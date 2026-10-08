@@ -59,7 +59,7 @@ void
 sockinit(void)
 {
   for(int i = 0;i < NSOCKHASH;i++){
-    initlock(&sockethash[i].lock, "socktbl");
+    initlock(&sockethash[i].lock, "socktable");
     sockethash[i].head = 0;
   }
   for(int i = 0;i < NCPU;i++)

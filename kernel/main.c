@@ -35,6 +35,7 @@ main()
     arp_init();
     pci_init();
     sockinit();
+    tcpinit();
 #endif    
     userinit();      // first user process
 #ifdef KCSAN

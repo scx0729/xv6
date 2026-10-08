@@ -31,6 +31,7 @@ int netqstat(struct netqstat*);
 int bind(uint16);
 int recvfrom(int, void*, int, uint32*, uint16*);
 int sendto(int, const void*, int, uint32, uint16);
+int tcp_connect(uint32, uint16, uint16);
 #endif
 #ifdef LAB_PGTBL
 int pgaccess(void *base, int len, void *mask);

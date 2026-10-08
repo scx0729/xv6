@@ -42,3 +42,4 @@ entry("pgaccess");
 entry("bind");
 entry("recvfrom");
 entry("sendto");
+entry("tcp_connect")

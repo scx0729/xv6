@@ -225,6 +225,25 @@ in_cksum(const unsigned char *addr, int len)
   return answer;
 }
 
+static uint16
+tcp_checksum(uint32 src, uint32 dst, const uchar *segment, uint tcp_len)
+{
+  uint32 sum = 0;
+  sum += src >> 16;
+  sum += src & 0xffff;
+  sum += dst >> 16;
+  sum += dst & 0xffff;
+  sum += IPPROTO_TCP;
+  sum += tcp_len;
+  for(uint i = 0;i + 1 < tcp_len;i += 2)
+    sum += ((uint16)segment[i] << 8) | segment[i+1];
+  if(tcp_len & 1)
+    sum += ((uint16)segment[tcp_len - 1] << 8);
+  while(sum >> 16)
+    sum = (sum >> 16) + (sum & 0xffff);
+  return ~sum & 0xffff;
+}
+
 // sends an ethernet packet
 static void
 net_tx_eth(struct mbuf *m, uint16 ethtype, uint8 *destination_mac)
@@ -311,6 +330,25 @@ net_tx_udp(struct mbuf *m, uint32 dip, uint16 sport, uint16 dport)
   udphdr->sum = 0;
   // now on to the IP layer
   net_tx_ip(m, IPPROTO_UDP, dip);
+}
+
+void
+net_tx_tcp(struct mbuf *m, uint32 dip, uint16 sport, uint16 dport, uint32 seq, uint32 ack, uint8 flags)
+{
+  struct tcp *tcphdr;
+  tcphdr = mbufpushhdr(m, *tcphdr);
+  memset(tcphdr, 0, sizeof(*tcphdr));
+  tcphdr->sport = htons(sport);
+  tcphdr->dport = htons(dport);
+  tcphdr->seq = htonl(seq);
+  tcphdr->offset = 5 << 4;
+  tcphdr->ack = htonl(ack);
+  tcphdr->flags = flags;
+  tcphdr->window = htons(2048);
+  tcphdr->urgent = 0;
+  tcphdr->checksum = 0;
+  tcphdr->checksum = htons(tcp_checksum(local_ip, dip, (uchar *)m->head, m->len));
+  net_tx_ip(m, IPPROTO_TCP, dip);
 }
 
 // sends an ARP packet
@@ -425,6 +463,40 @@ fail:
 }
 
 static void
+net_rx_tcp(struct mbuf *m, uint16 len, struct ip *iphdr)
+{
+  if(len < sizeof(struct tcp))
+    goto fail;
+  if(len > m->len)
+    goto fail;
+  struct tcp *tcphdr = (struct tcp *)m->head;
+  uint32 sip = ntohl(iphdr->ip_src);
+  uint32 dip = ntohl(iphdr->ip_dst);
+  if(tcp_checksum(sip, dip, (uchar *)m->head, len) != 0)
+    goto fail;
+  uint header_len = (tcphdr->offset >> 4) * 4;
+  if(header_len <  sizeof(struct tcp) || header_len > len)
+    goto fail;
+  uint16 sport = ntohs(tcphdr->sport);
+  uint16 dport = ntohs(tcphdr->dport);
+  uint32 seq = ntohl(tcphdr->seq);
+  uint32 ack = ntohl(tcphdr->ack);
+  uint8 flags = tcphdr->flags;
+  uint16 window = ntohs(tcphdr->window);
+  if(mbufpull(m, header_len) == 0)
+    goto fail;
+  uint payload_len = len - header_len;
+  if(payload_len > m->len)
+    goto fail;
+  if(mbuftrim(m, m->len - payload_len) == 0)
+   goto fail;
+  tcp_input(m, sip, dport, sport, seq, ack, flags, window);
+  return;
+fail:
+  mbuffree(m);
+}
+
+static void
 net_rx_icmp(struct mbuf *m, uint16 len)
 {
   mbuftrim(m, m->len - len);
@@ -506,6 +578,8 @@ net_rx_ip(struct mbuf *m)
     net_rx_udp(m, len, iphdr);
   } else if (iphdr->ip_p == IPPROTO_ICMP) {
     net_rx_icmp(m, len);
+  } else if (iphdr->ip_p == IPPROTO_TCP){
+    net_rx_tcp(m, len, iphdr);
   } else {
     goto fail;
   }

@@ -13,6 +13,7 @@ struct mbuf;
 struct netqstat;
 struct sock;
 struct netqstat;
+struct tcp_sock;
 #endif
 
 // bio.c
@@ -231,6 +232,9 @@ void            net_rx(struct mbuf*);
 void            net_tx_udp(struct mbuf*, uint32, uint16, uint16);
 void            arp_init(void);
 void            arp_tick(uint64);
+void            net_tx_tcp(struct mbuf *, uint32, uint16, uint16, uint32, uint32, uint8);
+void            tcpinit(void);
+void            tcp_input(struct mbuf *, uint32, uint16, uint16, uint32, uint32, uint8, uint16);
 
 // sysnet.c
 void            sockinit(void);
@@ -243,4 +247,7 @@ int             sockrecverr(uint32, uint16, uint16, uint8, uint8);
 int             sockbind(struct file **, uint16);
 int             sockrecvfrom(struct sock *, uint64, int, uint64, uint64);
 int             socksendto(struct sock *, uint64, int, uint32, uint16);
+
+// tcp.c
+int             tcpconnect(struct file **, uint32, uint16, uint16);
 #endif
