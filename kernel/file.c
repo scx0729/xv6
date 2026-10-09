@@ -83,6 +83,8 @@ fileclose(struct file *f)
 #ifdef LAB_NET
   else if(ff.type == FD_SOCK){
     sockclose(ff.sock);
+  } else if(ff.type == FD_TCP){
+    tcpclose(ff.tcp);
   }
 #endif
 }
@@ -131,6 +133,8 @@ fileread(struct file *f, uint64 addr, int n)
 #ifdef LAB_NET
   else if(f->type == FD_SOCK){
     r = sockread(f->sock, addr, n);
+  } else if(f->type == FD_TCP){
+    r = tcpread(f->tcp, addr, n);
   }
 #endif
   else {
@@ -188,6 +192,8 @@ filewrite(struct file *f, uint64 addr, int n)
 #ifdef LAB_NET
   else if(f->type == FD_SOCK){
     ret = sockwrite(f->sock, addr, n);
+  } else if(f->type == FD_TCP){
+    ret = tcpwrite(f->tcp, addr, n);
   }
 #endif
   else {

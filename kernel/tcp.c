@@ -9,6 +9,9 @@
 #include "file.h"
 #include "net.h"
 
+#define TCP_TIME_WAIT_TICKS 20
+#define TCP_MSS 1460
+
 enum tcp_state {
   TCP_CLOSED,
   TCP_SYN_SENT,
@@ -18,6 +21,7 @@ enum tcp_state {
   TCP_CLOSE_WAIT,
   TCP_LAST_ACK,
   TCP_TIME_WAIT,
+  TCP_CLOSING,
 };
 
 struct tcp_sock {
@@ -34,6 +38,7 @@ struct tcp_sock {
   struct mbufq rxq;
   int error;
   int eof;
+  struct mbuf *rx_current;
 };
 
 static struct {
@@ -87,6 +92,9 @@ tcp_input(struct mbuf *m, uint32 sip, uint16 lport, uint16 rport, uint32 seq, ui
     wakeup(ts);
     goto out;
   }
+  reply_ip = ts->raddr;
+  reply_lport = ts->lport;
+  reply_rport = ts->rport;
   if(ts->state == TCP_SYN_SENT){
     if((flags & TCP_SYN) == 0 || (flags & TCP_ACK) == 0 || ack != ts->snd_nxt)
       goto out;
@@ -97,9 +105,6 @@ tcp_input(struct mbuf *m, uint32 sip, uint16 lport, uint16 rport, uint32 seq, ui
     wakeup(ts);
     reply_seq = ts->snd_nxt;
     reply_ack = ts->rcv_nxt;
-    reply_ip = ts->raddr;
-    reply_lport = ts->lport;
-    reply_rport = ts->rport;
     send_ack = 1;
   } else if (ts->state == TCP_ESTABLISHED) {
     if((flags & TCP_ACK) == 0)
@@ -116,9 +121,6 @@ tcp_input(struct mbuf *m, uint32 sip, uint16 lport, uint16 rport, uint32 seq, ui
     if(seq != ts->rcv_nxt){
       reply_seq = ts->snd_nxt;
       reply_ack = ts->rcv_nxt;
-      reply_ip = ts->raddr;
-      reply_lport = ts->lport;
-      reply_rport = ts->rport;
       send_ack = 1;
       goto out;
     }
@@ -135,10 +137,87 @@ tcp_input(struct mbuf *m, uint32 sip, uint16 lport, uint16 rport, uint32 seq, ui
     wakeup(ts);
     reply_seq = ts->snd_nxt;
     reply_ack = ts->rcv_nxt;
-    reply_ip = ts->raddr;
-    reply_lport = ts->lport;
-    reply_rport = ts->rport;
     send_ack = 1;
+  } else if (ts->state == TCP_LAST_ACK) {
+    if(flags & TCP_ACK && ack == ts->snd_nxt){
+      ts->snd_una = ack;
+      ts->state = TCP_CLOSED;
+      wakeup(ts);
+    }
+    if(flags & TCP_FIN){
+      reply_seq = ts->snd_nxt;
+      reply_ack = ts->rcv_nxt;
+      send_ack = 1;
+    }
+  } else if (ts->state == TCP_FIN_WAIT_1) {
+    int fin_acked = (flags & TCP_ACK) && (ack == ts->snd_nxt);
+    if(fin_acked){
+      ts->snd_una = ack;
+      ts->state = TCP_FIN_WAIT_2;
+    }
+    if((m->len > 0 || (flags & TCP_FIN)) && seq != ts->rcv_nxt){
+      reply_seq = ts->snd_nxt;
+      reply_ack = ts->rcv_nxt;
+      send_ack = 1;
+      goto out;
+    }
+    if(m->len > 0){
+      ts->rcv_nxt += m->len;
+      send_ack = 1;
+    }
+    if(flags & TCP_FIN){
+      ts->rcv_nxt++;
+      send_ack = 1;
+      if(fin_acked)
+        ts->state = TCP_TIME_WAIT;
+      else
+        ts->state = TCP_CLOSING;
+      wakeup(ts);
+    }
+    reply_seq = ts->snd_nxt;
+    reply_ack = ts->rcv_nxt;
+  } else if (ts->state == TCP_FIN_WAIT_2) {
+    if((m->len > 0 || (flags & TCP_FIN)) && seq != ts->rcv_nxt){
+      reply_seq = ts->snd_nxt;
+      reply_ack = ts->rcv_nxt;
+      send_ack = 1;
+      goto out;
+    }
+    if(m->len > 0){
+      ts->rcv_nxt += m->len;
+      send_ack = 1;
+    }
+    if(flags & TCP_FIN){
+      ts->rcv_nxt++;
+      send_ack = 1;
+      ts->state = TCP_TIME_WAIT;
+      wakeup(ts);
+    }
+    reply_seq = ts->snd_nxt;
+    reply_ack = ts->rcv_nxt;
+  } else if(ts->state == TCP_CLOSING) {
+    if((flags & TCP_ACK) && ack == ts->snd_nxt){
+      ts->snd_una = ack;
+      ts->state = TCP_TIME_WAIT;
+      wakeup(ts);
+    }
+    if(flags & TCP_FIN){
+      reply_seq = ts->snd_nxt;
+      reply_ack = ts->rcv_nxt;
+      send_ack = 1;
+    }
+  } else if (ts->state == TCP_CLOSE_WAIT) {
+    if(flags & TCP_FIN) {
+      reply_seq = ts->snd_nxt;
+      reply_ack = ts->rcv_nxt;
+      send_ack = 1;
+    }
+  } else if (ts->state == TCP_TIME_WAIT) {
+    if(flags & TCP_FIN){
+      reply_seq = ts->snd_nxt;
+      reply_ack = ts->rcv_nxt;
+      send_ack = 1;
+    }
   }
 out:
   release(&ts->lock);
@@ -170,7 +249,8 @@ tcp_remove(struct tcp_sock *target)
   release(&tcptable.lock);
 }
 
-int tcpconnect(struct file **f, uint32 raddr, uint16 lport, uint16 rport)
+int
+tcpconnect(struct file **f, uint32 raddr, uint16 lport, uint16 rport)
 {
   struct tcp_sock *ts;
   struct mbuf *m = 0;
@@ -233,4 +313,169 @@ bad:
   if (*f)
     fileclose(*f);
   return -1;
+}
+
+void
+tcpclose(struct tcp_sock *ts)
+{
+  int sent = 0, slept = 0;
+  struct mbuf *reply = mbufalloc(MBUF_DEFAULT_HEADROOM);
+  if(reply == 0){
+    acquire(&ts->lock);
+    ts->error = 1;
+    ts->state = TCP_CLOSED;
+    wakeup(ts);
+    release(&ts->lock);
+    goto cleanup;
+  }
+  acquire(&ts->lock);
+  uint32 ip = ts->raddr;
+  uint16 lport = ts->lport;
+  uint16 rport = ts->rport;
+  uint32 seq = ts->snd_nxt;
+  uint32 ack = ts->rcv_nxt;
+  uint8 flags = TCP_FIN | TCP_ACK;
+  if(ts->state == TCP_ESTABLISHED) {
+    ts->snd_nxt++;
+    ts->state = TCP_FIN_WAIT_1;
+    sent = 1;
+    slept = 1;
+  } else if (ts->state == TCP_CLOSE_WAIT) {
+    ts->snd_nxt++;
+    ts->state = TCP_LAST_ACK;
+    sent = 1;
+    slept = 1;
+  } else if (ts->state == TCP_SYN_SENT) {
+    ts->error = 1;
+    ts->state = TCP_CLOSED;
+  } else if (ts->state == TCP_CLOSED) {
+    // Nothing to send or wait for
+  } else {
+    slept = 1;
+  }
+  release(&ts->lock);
+  if(sent)
+    net_tx_tcp(reply, ip, lport, rport, seq, ack, flags);
+  else
+    mbuffree(reply);
+  if(slept){
+    acquire(&ts->lock);
+    while(ts->state != TCP_TIME_WAIT && ts->state != TCP_CLOSED && !ts->error && !myproc()->killed)
+      sleep(ts, &ts->lock);
+    release(&ts->lock);
+
+    if(ts->state == TCP_TIME_WAIT){
+      uint start;
+      acquire(&tickslock);
+      start = ticks;
+      while(ticks - start < TCP_TIME_WAIT_TICKS){
+        sleep(&ticks, &tickslock);
+      }
+      release(&tickslock);
+    }
+  }
+cleanup:
+  tcp_remove(ts);
+  struct mbuf *m;
+  while((m = mbufq_pophead(&ts->rxq)) != 0)
+    mbuffree(m);
+  if(ts->rx_current)
+    mbuffree(ts->rx_current);
+  kfree((void *)ts);
+}
+
+int
+tcpwrite(struct tcp_sock *ts, uint64 addr, int n)
+{
+  if(n < 0)
+    return -1;
+  if(n == 0)
+    return 0;
+  int done = 0;
+  struct mbuf *m = 0;
+  while(done < n){
+    int count = n - done;
+    if(count > TCP_MSS)
+      count = TCP_MSS;
+    m = mbufalloc(MBUF_DEFAULT_HEADROOM);
+    if(m == 0)
+      goto bad;
+    char *payload = mbufput(m, count);
+    if(copyin(myproc()->pagetable, payload, addr + done, count) < 0)
+      goto bad;
+    acquire(&ts->lock);
+    if(ts->state != TCP_ESTABLISHED || ts->error){
+      release(&ts->lock);
+      goto bad;
+    }
+    uint32 ip = ts->raddr;
+    uint16 lport = ts->lport;
+    uint16 rport = ts->rport;
+    uint32 seq = ts->snd_nxt;
+    uint32 ack = ts->rcv_nxt;
+    ts->snd_nxt += count;
+    uint32 expected_ack = ts->snd_nxt;
+    release(&ts->lock);
+    net_tx_tcp(m, ip, lport, rport, seq, ack, TCP_ACK | TCP_PSH);
+    m = 0;
+    acquire(&ts->lock);
+    while(ts->snd_una < expected_ack && !ts->error && ts->state == TCP_ESTABLISHED && !myproc()->killed)
+      sleep(ts, &ts->lock);
+    if(ts->snd_una < expected_ack){
+      release(&ts->lock);
+      goto bad;
+    }
+    release(&ts->lock);
+    done += count;
+  }
+  return n;
+bad:
+  if(m)
+    mbuffree(m);
+  if(done == 0)
+    return -1;
+  return done;
+}
+
+int
+tcpread(struct tcp_sock *ts, uint64 addr, int n){
+  if(n < 0)
+    return -1;
+  if(n == 0)
+    return 0;
+  acquire(&ts->lock);
+  while(ts->rx_current == 0 && mbufq_empty(&ts->rxq) && !ts->eof && !ts->error && ts->state != TCP_CLOSED && !myproc()->killed)
+    sleep(ts, &ts->lock);
+  struct mbuf *m = ts->rx_current;
+  if(m == 0)
+    m = mbufq_pophead(&ts->rxq);
+  ts->rx_current = 0;
+  if(m == 0){
+    int result;
+    if(ts->error || myproc()->killed)
+      result = -1;
+    else
+      result = 0;
+    release(&ts->lock);
+    return result;
+  }
+  release(&ts->lock);
+  int count = n;
+  if(count > m->len)
+    count = m->len;
+  if(copyout(myproc()->pagetable, addr, m->head, count) < 0){
+    acquire(&ts->lock);
+    ts->rx_current = m;
+    release(&ts->lock);
+    return -1;
+  }
+  mbufpull(m, count);
+  if(m->len == 0)
+    mbuffree(m);
+  else {
+    acquire(&ts->lock);
+    ts->rx_current = m;
+    release(&ts->lock);
+  }
+  return count;
 }

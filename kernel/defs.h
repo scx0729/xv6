@@ -250,4 +250,7 @@ int             socksendto(struct sock *, uint64, int, uint32, uint16);
 
 // tcp.c
 int             tcpconnect(struct file **, uint32, uint16, uint16);
+void            tcpclose(struct tcp_sock *);
+int             tcpwrite(struct tcp_sock *, uint64, int);
+int             tcpread(struct tcp_sock *, uint64, int);
 #endif

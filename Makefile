@@ -258,7 +258,9 @@ UPROGS += \
 	$U/_netqtest\
 	$U/_rxlivelocktest\
 	$U/_sockhashtest\
-	$U/_udpservertest
+	$U/_udpservertest\
+	$U/_tcptest\
+	$U/_httpget
 endif
 
 ifdef ARP_CACHE_TEST
@@ -325,6 +327,12 @@ SERVERPORT = $(shell expr `id -u` % 5000 + 25099)
 
 server:
 	python3 server.py $(SERVERPORT)
+
+tcp-server:
+	python3 tcp_server.py $(SERVERPORT)
+
+http-server:
+	python3 -m http.server $(SERVERPORT) --bind 0.0.0.0
 
 livelock-server:
 	python3 rx_livelock_server.py $(SERVERPORT)
